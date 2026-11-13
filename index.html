@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>예원 전자서명 시스템</title>
+  <link rel="stylesheet" href="styles.css">
+  
+  <!-- PDF.js & pdf-lib CDN for browser-based PDF processing -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script>
+    // PDF.js worker fallback
+    if (window.pdfjsLib) {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    }
+  </script>
+</head>
+<body>
+
+  <!-- 헤더 -->
+  <header class="app-header">
+    <div class="header-container">
+      <a href="#" class="brand" id="brandLogo">
+        <div class="brand-icon">✍️</div>
+        <div>
+          <span class="brand-title">예원 전자서명 시스템</span>
+          <span class="brand-badge" id="currentRoleBadge">사용자 모드</span>
+        </div>
+      </a>
+      <div class="header-nav">
+        <!-- 상단 우측: 작고 아담한 관리자 로그인 입력창 -->
+        <form id="headerAdminLoginForm" class="header-admin-login-form" autocomplete="off">
+          <span class="header-login-badge">⚙️ 관리자</span>
+          <input type="text" id="headerAdminId" class="header-mini-input" placeholder="아이디" value="admin" required title="관리자 아이디 (기본: admin)">
+          <input type="password" id="headerAdminPw" class="header-mini-input" placeholder="비밀번호" required title="관리자 비밀번호 (기본: admin4441#)">
+          <button type="submit" id="btnHeaderLogin" class="header-mini-btn">로그인</button>
+        </form>
+
+        <!-- 로그인 완료 시 표시되는 관리자 제어 바 -->
+        <div id="headerAdminLoggedInBar" class="header-admin-bar" style="display: none;">
+          <span class="header-admin-badge">👑 관리자 로그인 중</span>
+          <button type="button" class="nav-link-btn" id="btnSwitchToUser">
+            👤 사용자 화면
+          </button>
+          <button type="button" class="nav-link-btn primary" id="btnSwitchToAdmin">
+            ⚙️ 관리자 대시보드
+          </button>
+          <button type="button" class="nav-link-btn danger" id="btnAdminLogout">
+            🚪 로그아웃
+          </button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- 메인 본문 -->
+  <main class="main-wrapper">
+
+    <!-- ============================================== -->
+    <!-- [1] 사용자 화면 (User View)                    -->
+    <!-- ============================================== -->
+    <section id="userViewSection">
+      
+      <!-- 1단계: 성명 입력 창 -->
+      <div class="card user-box" id="userNameStep">
+        <div class="welcome-icon-box">📝</div>
+        <h2>전자서명 본인 확인</h2>
+        <p>양식에 서명하시려면 선생님의 성명을 입력해 주세요.</p>
+        
+        <div class="name-input-group">
+          <input type="text" id="signerNameInput" class="input-field" placeholder="성명을 입력하세요 (예: 홍길동)" autocomplete="off">
+          <button type="button" id="btnCheckName" class="btn-primary">확인</button>
+        </div>
+
+        <!-- 일치하지 않을 때 표기되는 알림창 -->
+        <div id="nameErrorAlert" class="alert-message alert-error">
+          ⚠️ 다시 입력해 주세요
+        </div>
+      </div>
+
+      <!-- 2단계: 선생님 환영 & 서명란 제시 -->
+      <div class="signing-view" id="userSigningStep">
+        
+        <!-- 환영 카드 (요구사항: “000 선생님 반갑습니다” 표기) -->
+        <div class="teacher-greeting-card">
+          <div class="greeting-text-box">
+            <h3 id="teacherGreetingTitle">홍길동 선생님 반갑습니다</h3>
+            <p>아래 서명 양식을 확인하신 후 정자 또는 필기체로 서명해 주세요.</p>
+          </div>
+          <button type="button" class="change-name-btn" id="btnReenterName">이름 다시 입력</button>
+        </div>
+
+        <!-- 서명 대상 문서 미리보기 -->
+        <div class="doc-preview-card">
+          <div class="card-title">
+            <span>📄 서명 대상 문서 확인</span>
+            <span id="docFileNameBadge" class="brand-badge">표준 서약서 양식</span>
+          </div>
+          <p class="card-desc">문서 내용을 아래로 스크롤하여 확인하실 수 있습니다.</p>
+          <div class="doc-viewer-frame" id="userDocViewerFrame">
+            <!-- PDF 페이지 캔버스들이 렌더링됩니다 -->
+            <div id="userDocPagesContainer"></div>
+          </div>
+        </div>
+
+        <!-- 서명란 (Canvas 패드) -->
+        <div class="signature-card">
+          <div class="signature-card-header">
+            <h4>✍️ 서명란</h4>
+            <span class="signature-tip">마우스나 손가락(터치)으로 정성껏 서명해 주세요.</span>
+          </div>
+
+          <div class="signature-canvas-container" id="signatureCanvasContainer">
+            <div class="canvas-watermark" id="canvasWatermark">이곳에 서명해 주세요</div>
+            <canvas id="signatureCanvas"></canvas>
+          </div>
+
+          <!-- 서명란 아래 요구사항 버튼: [다시 하기], [제출] -->
+          <div class="signature-actions">
+            <button type="button" id="btnResetSign" class="btn-secondary">
+              🔄 다시 하기
+            </button>
+            <button type="button" id="btnSubmitSign" class="btn-submit">
+              ✅ 제출
+            </button>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- 3단계: 제출 완료 화면 -->
+      <div class="card user-box" id="userCompleteStep" style="display: none;">
+        <div class="welcome-icon-box" style="background: var(--success-light); color: var(--success);">🎉</div>
+        <h2>서명이 정상적으로 제출되었습니다</h2>
+        <p><strong id="completedTeacherName">홍길동</strong> 선생님의 전자서명이 안전하게 저장 및 날인되었습니다.</p>
+        
+        <div style="display: flex; gap: 0.75rem; justify-content: center; margin-top: 1.5rem;">
+          <button type="button" id="btnDownloadMySignedPdf" class="btn-primary" style="background: var(--success);">
+            📥 서명된 PDF 확인 및 다운로드
+          </button>
+          <button type="button" id="btnRestartUserFlow" class="btn-secondary">
+            첫 화면으로
+          </button>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ============================================== -->
+    <!-- [2] 관리자 화면 (Admin View)                   -->
+    <!-- ============================================== -->
+    <section id="adminViewSection" style="display: none;">
+      
+      <!-- 상단 탭 네비게이션: [시작], [진행], [완료] -->
+      <nav class="admin-tab-nav">
+        <button type="button" class="tab-btn active" data-tab="tab-start">
+          🚀 [시작] 양식 & 대상자 등록
+        </button>
+        <button type="button" class="tab-btn" data-tab="tab-progress">
+          📊 [진행] 실시간 서명 현황
+        </button>
+        <button type="button" class="tab-btn" data-tab="tab-complete">
+          📁 [완료] PDF 문서 다운로드
+        </button>
+      </nav>
+
+      <!-- 1. [시작] 메뉴 탭 -->
+      <div class="tab-content active" id="tab-start">
+        
+        <!-- 양식 파일 업로드 -->
+        <div class="card">
+          <div class="card-title">📄 양식 파일 업로드</div>
+          <p class="card-desc">선생님들께서 서명하실 서약서, 동의서 등의 PDF 양식 파일을 등록합니다.</p>
+          
+          <div class="upload-dropzone" id="pdfDropzone">
+            <div class="upload-icon">📤</div>
+            <div class="upload-text">PDF 양식 파일을 이곳으로 끌어다 놓거나 클릭하여 선택하세요</div>
+            <div class="upload-sub">권장 형식: .pdf (문서 내 서명란 위치에 자동 합성됩니다)</div>
+            <input type="file" id="pdfFileInput" accept="application/pdf" style="display: none;">
+          </div>
+
+          <div class="current-form-badge">
+            <div class="form-info">
+              <span>📌 현재 등록된 양식:</span>
+              <span id="currentFormName" style="color: var(--primary);">기본 표준 서약서 양식 (내장 템플릿)</span>
+            </div>
+            <div style="display: flex; gap: 0.5rem;">
+              <button type="button" id="btnPreviewCurrentForm" class="nav-link-btn">미리보기</button>
+              <button type="button" id="btnResetToDefaultForm" class="nav-link-btn">기본 양식으로 복원</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 서명 대상자 관리 -->
+        <div class="card">
+          <div class="card-title">👥 서명 대상자 (선생님) 명단 관리</div>
+          <p class="card-desc">입력된 성명과 일치하는 선생님만 본인 확인 후 서명란이 제시됩니다.</p>
+          
+          <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem;">
+            <input type="text" id="newSignerInput" class="input-field" placeholder="추가할 선생님 성명 입력 (쉼표나 공백으로 여러 명 입력 가능: 예: 김철수, 이영희)">
+            <button type="button" id="btnAddSigners" class="btn-primary" style="white-space: nowrap;">선생님 추가</button>
+          </div>
+
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+            <span style="font-size: 0.9rem; font-weight: 700; color: var(--gray-700);">
+              등록된 대상자 (<span id="signerCountBadge">5</span>명)
+            </span>
+            <button type="button" id="btnClearAllSigners" class="nav-link-btn" style="color: var(--danger); border-color: #fecaca;">
+              전체 비우기
+            </button>
+          </div>
+
+          <div class="signer-tags" id="signerTagsList">
+            <!-- 등록된 선생님 성명 태그들이 렌더링됩니다 -->
+          </div>
+        </div>
+
+        <!-- 서명 날인 위치 및 옵션 설정 -->
+        <div class="card">
+          <div class="card-title">📍 서명 위치 설정 (PDF 날인 좌표)</div>
+          <p class="card-desc">PDF 문서의 어느 위치에 서명 이미지가 날인될지 지정합니다. (기본 프리셋: 1페이지 하단 서명란)</p>
+          
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-top: 1rem;">
+            <div>
+              <label style="font-size: 0.85rem; font-weight: 700; color: var(--gray-700); display: block; margin-bottom: 0.35rem;">적용 페이지</label>
+              <input type="number" id="sigPageInput" class="input-field" value="1" min="1">
+            </div>
+            <div>
+              <label style="font-size: 0.85rem; font-weight: 700; color: var(--gray-700); display: block; margin-bottom: 0.35rem;">X 좌표 (좌측 여백: pt)</label>
+              <input type="number" id="sigXInput" class="input-field" value="400">
+            </div>
+            <div>
+              <label style="font-size: 0.85rem; font-weight: 700; color: var(--gray-700); display: block; margin-bottom: 0.35rem;">Y 좌표 (하단 기준: pt)</label>
+              <input type="number" id="sigYInput" class="input-field" value="120">
+            </div>
+            <div>
+              <label style="font-size: 0.85rem; font-weight: 700; color: var(--gray-700); display: block; margin-bottom: 0.35rem;">서명 크기 (가로 x 세로)</label>
+              <div style="display: flex; gap: 0.3rem;">
+                <input type="number" id="sigWidthInput" class="input-field" value="140" title="너비">
+                <input type="number" id="sigHeightInput" class="input-field" value="60" title="높이">
+              </div>
+            </div>
+          </div>
+
+          <div style="margin-top: 1.25rem; display: flex; justify-content: flex-end;">
+            <button type="button" id="btnSaveStartConfig" class="btn-primary">
+              💾 설정 저장하기
+            </button>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- 2. [진행] 메뉴 탭 -->
+      <div class="tab-content" id="tab-progress">
+        
+        <!-- 실시간 요약 카드 -->
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-label">총 대상 인원</div>
+            <div class="stat-value" id="statTotalSigners">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">서명 완료</div>
+            <div class="stat-value success" id="statCompletedSigners">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">서명 대기 중</div>
+            <div class="stat-value warning" id="statPendingSigners">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">서명 완료율</div>
+            <div class="stat-value primary" id="statProgressPercent">0%</div>
+          </div>
+        </div>
+
+        <!-- 실시간 서명 현황 게시판 -->
+        <div class="card">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.25rem;">
+            <div>
+              <div class="card-title" style="margin-bottom: 0.2rem;">📋 실시간 서명 현황 게시판</div>
+              <p class="card-desc" style="margin-bottom: 0;">선생님들의 서명 작성 내용 및 일시가 실시간으로 반영됩니다.</p>
+            </div>
+            <div style="display: flex; gap: 0.5rem;">
+              <button type="button" id="btnCopyUserSignLink" class="nav-link-btn primary">
+                🔗 사용자 서명 링크 복사
+              </button>
+              <button type="button" id="btnRefreshProgress" class="nav-link-btn">
+                🔄 새로고침
+              </button>
+            </div>
+          </div>
+
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th style="width: 80px;">번호</th>
+                  <th>성명</th>
+                  <th style="width: 130px;">진행 상태</th>
+                  <th style="width: 190px;">서명 일시</th>
+                  <th style="width: 160px; text-align: center;">서명 내용</th>
+                  <th style="width: 140px; text-align: right;">관리</th>
+                </tr>
+              </thead>
+              <tbody id="progressTableBody">
+                <!-- 실시간 서명 내역 행들이 렌더링됩니다 -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- 3. [완료] 메뉴 탭 -->
+      <div class="tab-content" id="tab-complete">
+        
+        <div class="card">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.25rem; flex-wrap: wrap; gap: 0.75rem;">
+            <div>
+              <div class="card-title" style="margin-bottom: 0.2rem;">📥 서명 완료 PDF 문서 발급 및 다운로드</div>
+              <p class="card-desc" style="margin-bottom: 0;">서명이 완료된 최종 PDF 문서를 개별 또는 일괄로 다운로드할 수 있습니다.</p>
+            </div>
+            <div style="display: flex; gap: 0.5rem;">
+              <button type="button" id="btnDownloadAllPdfZip" class="btn-primary" style="background: var(--success);">
+                📦 전체 완료 문서 일괄 다운로드 (ZIP)
+              </button>
+            </div>
+          </div>
+
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th style="width: 80px;">번호</th>
+                  <th>성명</th>
+                  <th>서명 완료 일시</th>
+                  <th>문서명</th>
+                  <th style="width: 220px; text-align: right;">다운로드 / 미리보기</th>
+                </tr>
+              </thead>
+              <tbody id="completeTableBody">
+                <!-- 완료된 대상자 PDF 다운로드 행들이 렌더링됩니다 -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+      </div>
+
+    </section>
+
+  </main>
+
+  <!-- ============================================== -->
+  <!-- 모달 창: 관리자 로그인 모달                     -->
+  <!-- ============================================== -->
+  <div class="modal-overlay" id="adminLoginModal">
+    <div class="modal-card">
+      <button type="button" class="modal-close-btn" id="btnCloseLoginModal">&times;</button>
+      <h3 style="font-size: 1.35rem; font-weight: 800; margin-bottom: 0.4rem; color: var(--gray-900);">🔐 관리자 로그인</h3>
+      <p style="font-size: 0.875rem; color: var(--gray-500); margin-bottom: 1.5rem;">
+        시스템 관리를 위해 아이디와 비밀번호를 입력해 주세요.
+      </p>
+
+      <form id="adminLoginForm">
+        <div style="margin-bottom: 1rem;">
+          <label style="font-size: 0.85rem; font-weight: 700; color: var(--gray-700); display: block; margin-bottom: 0.35rem;">아이디</label>
+          <input type="text" id="adminIdInput" class="input-field" placeholder="아이디 입력" required autocomplete="username">
+        </div>
+
+        <div style="margin-bottom: 1.25rem;">
+          <label style="font-size: 0.85rem; font-weight: 700; color: var(--gray-700); display: block; margin-bottom: 0.35rem;">비밀번호</label>
+          <input type="password" id="adminPwInput" class="input-field" placeholder="비밀번호 입력" required autocomplete="current-password">
+        </div>
+
+        <div id="loginErrorAlert" class="alert-message alert-error" style="margin-bottom: 1rem;">
+          아이디 또는 비밀번호가 올바르지 않습니다.
+        </div>
+
+        <button type="submit" class="btn-primary" style="width: 100%;">로그인</button>
+      </form>
+
+      <div style="margin-top: 1.25rem; padding: 0.75rem; background: var(--gray-100); border-radius: var(--radius-md); font-size: 0.8rem; color: var(--gray-600); line-height: 1.4;">
+        💡 <strong>계정 안내</strong><br>
+        • 기본 아이디: <code>admin</code><br>
+        • 기본 비밀번호: <code>admin4441#</code><br>
+        • 아이디/비밀번호 변경은 안티그래비티 대화창 또는 <code>config.js</code>를 통해 손쉽게 수정하실 수 있습니다.
+      </div>
+    </div>
+  </div>
+
+  <!-- 모달 창: 서명 확대 보기 모달 -->
+  <div class="modal-overlay" id="signatureViewModal">
+    <div class="modal-card" style="text-align: center; max-width: 500px;">
+      <button type="button" class="modal-close-btn" id="btnCloseSignatureModal">&times;</button>
+      <h3 style="font-size: 1.25rem; font-weight: 800; margin-bottom: 0.5rem;" id="sigModalTitle">서명 상세 확인</h3>
+      <p style="font-size: 0.85rem; color: var(--gray-500); margin-bottom: 1rem;" id="sigModalDate"></p>
+      <div style="background: white; border: 1.5px solid var(--gray-200); border-radius: var(--radius-md); padding: 1.5rem; margin-bottom: 1.25rem;">
+        <img id="sigModalImage" src="" alt="서명 이미지" style="max-width: 100%; max-height: 220px; object-fit: contain;">
+      </div>
+      <button type="button" class="btn-secondary" id="btnCloseSigModalBtn" style="width: 100%;">닫기</button>
+    </div>
+  </div>
+
+  <!-- 모달 창: PDF 전체 미리보기 모달 -->
+  <div class="modal-overlay" id="pdfPreviewModal">
+    <div class="modal-card" style="max-width: 850px; width: 95%;">
+      <button type="button" class="modal-close-btn" id="btnClosePdfPreviewModal">&times;</button>
+      <h3 style="font-size: 1.25rem; font-weight: 800; margin-bottom: 1rem;" id="pdfPreviewModalTitle">문서 미리보기</h3>
+      <div style="height: 550px; overflow-y: auto; background: var(--gray-100); border-radius: var(--radius-md); padding: 1rem;" id="modalPdfPagesContainer">
+        <!-- PDF 페이지들이 표시됩니다 -->
+      </div>
+    </div>
+  </div>
+
+  <!-- 알림 토스트 메시지 -->
+  <div class="toast" id="appToast">알림 메시지</div>
+
+  <!-- 자바스크립트 로직 -->
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

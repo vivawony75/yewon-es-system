@@ -1,0 +1,1595 @@
+/**
+ * [예원전자서명시스템] 메인 애플리케이션 로직 (app.js)
+ */
+
+(function () {
+  'use strict';
+
+  // ==========================================================================
+  // [1] 전역 상태 및 데이터베이스 관리 (IndexedDB)
+  // ==========================================================================
+  const DB_NAME = 'YewonESignDB';
+  const DB_VERSION = 1;
+  let db = null;
+
+  // 인메모리 상태
+  const state = {
+    isAdminLoggedIn: false,
+    currentSignerName: null,
+    signers: [...(window.APP_CONFIG?.defaultSigners || ['홍길동', '김영희', '이철수', '박민수', '정수진'])],
+    signatures: {}, // name -> { name, signedAt, signatureImage, pdfBlob }
+    pdfTemplate: {
+      name: '기본 표준 서약서 양식.pdf',
+      bytes: null
+    },
+    sigPosition: {
+      page: window.APP_CONFIG?.defaultSignaturePosition?.page || 1,
+      x: window.APP_CONFIG?.defaultSignaturePosition?.x || 400,
+      y: window.APP_CONFIG?.defaultSignaturePosition?.y || 120,
+      width: window.APP_CONFIG?.defaultSignaturePosition?.width || 140,
+      height: window.APP_CONFIG?.defaultSignaturePosition?.height || 60
+    }
+  };
+
+  // IndexedDB 초기화
+  function initDB() {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(DB_NAME, DB_VERSION);
+      request.onupgradeneeded = (e) => {
+        const database = e.target.result;
+        if (!database.objectStoreNames.contains('files')) {
+          database.createObjectStore('files', { keyPath: 'id' });
+        }
+        if (!database.objectStoreNames.contains('signatures')) {
+          database.createObjectStore('signatures', { keyPath: 'name' });
+        }
+      };
+      request.onsuccess = (e) => {
+        db = e.target.result;
+        resolve(db);
+      };
+      request.onerror = (e) => {
+        console.error('IndexedDB open error:', e);
+        resolve(null); // 에러 발생 시 메모리/로컬스토리지 폴백
+      };
+    });
+  }
+
+  async function saveFileToDB(id, data, name) {
+    if (!db) return;
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction('files', 'readwrite');
+        const store = tx.objectStore('files');
+        store.put({ id, data, name, updatedAt: new Date().toISOString() });
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => resolve(false);
+      } catch (err) {
+        console.warn('saveFileToDB failed:', err);
+        resolve(false);
+      }
+    });
+  }
+
+  async function getFileFromDB(id) {
+    if (!db) return null;
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction('files', 'readonly');
+        const store = tx.objectStore('files');
+        const req = store.get(id);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => resolve(null);
+      } catch (err) {
+        resolve(null);
+      }
+    });
+  }
+
+  async function saveSignatureToDB(record) {
+    if (!db) return;
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction('signatures', 'readwrite');
+        const store = tx.objectStore('signatures');
+        store.put(record);
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => resolve(false);
+      } catch (err) {
+        resolve(false);
+      }
+    });
+  }
+
+  async function getAllSignaturesFromDB() {
+    if (!db) return [];
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction('signatures', 'readonly');
+        const store = tx.objectStore('signatures');
+        const req = store.getAll();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => resolve([]);
+      } catch (err) {
+        resolve([]);
+      }
+    });
+  }
+
+  async function removeSignatureFromDB(name) {
+    if (!db) return;
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction('signatures', 'readwrite');
+        const store = tx.objectStore('signatures');
+        store.delete(name);
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => resolve(false);
+      } catch (err) {
+        resolve(false);
+      }
+    });
+  }
+
+  // 로컬스토리지 설정 로드 및 동기화
+  function loadLocalSettings() {
+    try {
+      const savedSigners = localStorage.getItem('yewon_signers');
+      if (savedSigners) {
+        state.signers = JSON.parse(savedSigners);
+      }
+      const savedPos = localStorage.getItem('yewon_sig_position');
+      if (savedPos) {
+        state.sigPosition = { ...state.sigPosition, ...JSON.parse(savedPos) };
+      }
+    } catch (e) {
+      console.warn('loadLocalSettings error:', e);
+    }
+  }
+
+  function saveLocalSettings() {
+    try {
+      localStorage.setItem('yewon_signers', JSON.stringify(state.signers));
+      localStorage.setItem('yewon_sig_position', JSON.stringify(state.sigPosition));
+    } catch (e) {}
+  }
+
+  // ==========================================================================
+  // [2] 기본 표준 서약서 PDF 자동 생성 (템플릿이 없을 때 즉시 동작)
+  // ==========================================================================
+  async function generateDefaultPdfTemplate() {
+    if (window.PDFLib) {
+      const { PDFDocument, rgb, StandardFonts } = window.PDFLib;
+      const pdfDoc = await PDFDocument.create();
+      const page = pdfDoc.addPage([595.28, 841.89]); // A4 표준 크기
+      const font = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+      const fontRegular = await pdfDoc.embedFont(StandardFonts.Helvetica);
+
+      // 상단 테두리 장식
+      page.drawRectangle({
+        x: 40,
+        y: 800,
+        width: 515,
+        height: 4,
+        color: rgb(0.14, 0.38, 0.92)
+      });
+
+      // 제목 및 안내 텍스트 (PDFLib 기본 영문 폰트 호환 및 깔끔한 양식 레이아웃)
+      page.drawText('STANDARD AGREEMENT & E-SIGNATURE FORM', {
+        x: 65,
+        y: 755,
+        size: 16,
+        font: font,
+        color: rgb(0.1, 0.1, 0.1)
+      });
+
+      page.drawText('[ Electronic Signature & Consent Form / Yewon System ]', {
+        x: 135,
+        y: 735,
+        size: 10,
+        font: fontRegular,
+        color: rgb(0.35, 0.35, 0.35)
+      });
+
+      // 문서 내용 가이드 박스
+      page.drawRectangle({
+        x: 40,
+        y: 260,
+        width: 515,
+        height: 440,
+        borderColor: rgb(0.8, 0.85, 0.9),
+        borderWidth: 1,
+        color: rgb(0.97, 0.98, 1.0)
+      });
+
+      const bodyLines = [
+        '1. Purpose: This document confirms the formal agreement and identity verification',
+        '   for educational and administrative procedures in the Yewon E-Sign System.',
+        '',
+        '2. Confidentiality & Data Protection:',
+        '   All electronic records, digital signatures, and personal identification data',
+        '   are securely stored, encrypted, and processed in accordance with privacy laws.',
+        '',
+        '3. Legal Validity of Electronic Signature:',
+        '   The electronic signature executed by the designated educator/signee carries',
+        '   the full legal force and binding agreement equal to a handwritten signature.',
+        '',
+        '4. Scope of Consent:',
+        '   By signing below, the undersigned educator confirms having reviewed the terms',
+        '   and unconditionally agrees to the official tasks and guidelines set forth.'
+      ];
+
+      let yPos = 660;
+      for (const line of bodyLines) {
+        page.drawText(line, {
+          x: 60,
+          y: yPos,
+          size: 10,
+          font: fontRegular,
+          color: rgb(0.2, 0.2, 0.2)
+        });
+        yPos -= 22;
+      }
+
+      // 날짜 및 서명란 가이드 영역
+      page.drawRectangle({
+        x: 40,
+        y: 90,
+        width: 515,
+        height: 140,
+        borderColor: rgb(0.75, 0.75, 0.75),
+        borderWidth: 1,
+        color: rgb(1, 1, 1)
+      });
+
+      page.drawText('Official Signee Verification & Signature Area', {
+        x: 60,
+        y: 205,
+        size: 11,
+        font: font,
+        color: rgb(0.1, 0.2, 0.5)
+      });
+
+      page.drawText('Signee Name:', {
+        x: 60,
+        y: 160,
+        size: 10,
+        font: font,
+        color: rgb(0.3, 0.3, 0.3)
+      });
+
+      page.drawText('Date of Signing:', {
+        x: 60,
+        y: 125,
+        size: 10,
+        font: font,
+        color: rgb(0.3, 0.3, 0.3)
+      });
+
+      const todayStr = new Date().toLocaleDateString('ko-KR');
+      page.drawText(todayStr, {
+        x: 160,
+        y: 125,
+        size: 10,
+        font: fontRegular,
+        color: rgb(0.1, 0.1, 0.1)
+      });
+
+      // 서명 박스 점선 가이드
+      page.drawRectangle({
+        x: 380,
+        y: 105,
+        width: 155,
+        height: 80,
+        borderColor: rgb(0.2, 0.45, 0.9),
+        borderWidth: 1.5,
+        color: rgb(0.97, 0.98, 1)
+      });
+
+      page.drawText('[ Signature / 서명란 ]', {
+        x: 410,
+        y: 112,
+        size: 8.5,
+        font: font,
+        color: rgb(0.3, 0.5, 0.9)
+      });
+
+      const pdfBytes = await pdfDoc.save();
+      return pdfBytes;
+    }
+    return null;
+  }
+
+  // ==========================================================================
+  // [3] DOM 요소 참조
+  // ==========================================================================
+  const el = {
+    // Header & Navigation
+    brandLogo: document.getElementById('brandLogo'),
+    currentRoleBadge: document.getElementById('currentRoleBadge'),
+    btnSwitchToUser: document.getElementById('btnSwitchToUser'),
+    btnSwitchToAdmin: document.getElementById('btnSwitchToAdmin'),
+    btnAdminLogout: document.getElementById('btnAdminLogout'),
+    
+    // Header Inline Admin Login
+    headerAdminLoginForm: document.getElementById('headerAdminLoginForm'),
+    headerAdminId: document.getElementById('headerAdminId'),
+    headerAdminPw: document.getElementById('headerAdminPw'),
+    btnHeaderLogin: document.getElementById('btnHeaderLogin'),
+    headerAdminLoggedInBar: document.getElementById('headerAdminLoggedInBar'),
+
+    // User Screen
+    userViewSection: document.getElementById('userViewSection'),
+    userNameStep: document.getElementById('userNameStep'),
+    signerNameInput: document.getElementById('signerNameInput'),
+    btnCheckName: document.getElementById('btnCheckName'),
+    nameErrorAlert: document.getElementById('nameErrorAlert'),
+
+    // Signing Screen
+    userSigningStep: document.getElementById('userSigningStep'),
+    teacherGreetingTitle: document.getElementById('teacherGreetingTitle'),
+    btnReenterName: document.getElementById('btnReenterName'),
+    docFileNameBadge: document.getElementById('docFileNameBadge'),
+    userDocViewerFrame: document.getElementById('userDocViewerFrame'),
+    userDocPagesContainer: document.getElementById('userDocPagesContainer'),
+
+    // Signature Canvas
+    signatureCanvas: document.getElementById('signatureCanvas'),
+    signatureCanvasContainer: document.getElementById('signatureCanvasContainer'),
+    canvasWatermark: document.getElementById('canvasWatermark'),
+    btnResetSign: document.getElementById('btnResetSign'),
+    btnSubmitSign: document.getElementById('btnSubmitSign'),
+
+    // Complete Screen
+    userCompleteStep: document.getElementById('userCompleteStep'),
+    completedTeacherName: document.getElementById('completedTeacherName'),
+    btnDownloadMySignedPdf: document.getElementById('btnDownloadMySignedPdf'),
+    btnRestartUserFlow: document.getElementById('btnRestartUserFlow'),
+
+    // Admin Screen
+    adminViewSection: document.getElementById('adminViewSection'),
+    tabButtons: document.querySelectorAll('.tab-btn'),
+    tabContents: document.querySelectorAll('.tab-content'),
+
+    // Admin: [시작] Tab
+    pdfDropzone: document.getElementById('pdfDropzone'),
+    pdfFileInput: document.getElementById('pdfFileInput'),
+    currentFormName: document.getElementById('currentFormName'),
+    btnPreviewCurrentForm: document.getElementById('btnPreviewCurrentForm'),
+    btnResetToDefaultForm: document.getElementById('btnResetToDefaultForm'),
+    newSignerInput: document.getElementById('newSignerInput'),
+    btnAddSigners: document.getElementById('btnAddSigners'),
+    btnClearAllSigners: document.getElementById('btnClearAllSigners'),
+    signerCountBadge: document.getElementById('signerCountBadge'),
+    signerTagsList: document.getElementById('signerTagsList'),
+    sigPageInput: document.getElementById('sigPageInput'),
+    sigXInput: document.getElementById('sigXInput'),
+    sigYInput: document.getElementById('sigYInput'),
+    sigWidthInput: document.getElementById('sigWidthInput'),
+    sigHeightInput: document.getElementById('sigHeightInput'),
+    btnSaveStartConfig: document.getElementById('btnSaveStartConfig'),
+
+    // Admin: [진행] Tab
+    statTotalSigners: document.getElementById('statTotalSigners'),
+    statCompletedSigners: document.getElementById('statCompletedSigners'),
+    statPendingSigners: document.getElementById('statPendingSigners'),
+    statProgressPercent: document.getElementById('statProgressPercent'),
+    btnCopyUserSignLink: document.getElementById('btnCopyUserSignLink'),
+    btnRefreshProgress: document.getElementById('btnRefreshProgress'),
+    progressTableBody: document.getElementById('progressTableBody'),
+
+    // Admin: [완료] Tab
+    btnDownloadAllPdfZip: document.getElementById('btnDownloadAllPdfZip'),
+    completeTableBody: document.getElementById('completeTableBody'),
+
+    // Modals & Toast
+    adminLoginModal: document.getElementById('adminLoginModal'),
+    btnCloseLoginModal: document.getElementById('btnCloseLoginModal'),
+    adminLoginForm: document.getElementById('adminLoginForm'),
+    adminIdInput: document.getElementById('adminIdInput'),
+    adminPwInput: document.getElementById('adminPwInput'),
+    loginErrorAlert: document.getElementById('loginErrorAlert'),
+
+    signatureViewModal: document.getElementById('signatureViewModal'),
+    btnCloseSignatureModal: document.getElementById('btnCloseSignatureModal'),
+    btnCloseSigModalBtn: document.getElementById('btnCloseSigModalBtn'),
+    sigModalTitle: document.getElementById('sigModalTitle'),
+    sigModalDate: document.getElementById('sigModalDate'),
+    sigModalImage: document.getElementById('sigModalImage'),
+
+    pdfPreviewModal: document.getElementById('pdfPreviewModal'),
+    btnClosePdfPreviewModal: document.getElementById('btnClosePdfPreviewModal'),
+    pdfPreviewModalTitle: document.getElementById('pdfPreviewModalTitle'),
+    modalPdfPagesContainer: document.getElementById('modalPdfPagesContainer'),
+
+    appToast: document.getElementById('appToast')
+  };
+
+  // ==========================================================================
+  // [4] 토스트 알림 메시지 헬퍼
+  // ==========================================================================
+  let toastTimer = null;
+  function showToast(message, duration = 2500) {
+    if (!el.appToast) return;
+    el.appToast.textContent = message;
+    el.appToast.style.display = 'block';
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      el.appToast.style.display = 'none';
+    }, duration);
+  }
+
+  // ==========================================================================
+  // [5] 서명 캔버스 (HTML5 Canvas Signature Pad) 구현
+  // ==========================================================================
+  let canvasCtx = null;
+  let isDrawing = false;
+  let hasDrawn = false;
+  let lastX = 0;
+  let lastY = 0;
+
+  function initSignatureCanvas() {
+    const canvas = el.signatureCanvas;
+    if (!canvas) return;
+    const container = el.signatureCanvasContainer;
+
+    // 고해상도(Retina) 캔버스 배율 처리
+    const rect = container.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+
+    canvasCtx = canvas.getContext('2d');
+    canvasCtx.scale(dpr, dpr);
+    canvasCtx.lineCap = 'round';
+    canvasCtx.lineJoin = 'round';
+    canvasCtx.lineWidth = 2.5;
+    canvasCtx.strokeStyle = '#0f172a'; // 서명 잉크 색상
+
+    clearSignatureCanvas();
+
+    // 마우스 및 터치 포인터 이벤트 등록 (펜, 손가락, 마우스 통합)
+    canvas.addEventListener('pointerdown', onPointerDown);
+    canvas.addEventListener('pointermove', onPointerMove);
+    canvas.addEventListener('pointerup', onPointerUp);
+    canvas.addEventListener('pointercancel', onPointerUp);
+  }
+
+  function getCanvasPos(e) {
+    const rect = el.signatureCanvas.getBoundingClientRect();
+    return {
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top
+    };
+  }
+
+  function onPointerDown(e) {
+    isDrawing = true;
+    el.signatureCanvas.setPointerCapture(e.pointerId);
+    const pos = getCanvasPos(e);
+    lastX = pos.x;
+    lastY = pos.y;
+
+    if (!hasDrawn) {
+      hasDrawn = true;
+      if (el.canvasWatermark) el.canvasWatermark.style.opacity = '0';
+    }
+
+    // 단일 클릭 점 찍기
+    canvasCtx.beginPath();
+    canvasCtx.arc(lastX, lastY, canvasCtx.lineWidth / 2, 0, Math.PI * 2);
+    canvasCtx.fillStyle = canvasCtx.strokeStyle;
+    canvasCtx.fill();
+  }
+
+  function onPointerMove(e) {
+    if (!isDrawing) return;
+    const pos = getCanvasPos(e);
+
+    canvasCtx.beginPath();
+    canvasCtx.moveTo(lastX, lastY);
+    canvasCtx.lineTo(pos.x, pos.y);
+    canvasCtx.stroke();
+
+    lastX = pos.x;
+    lastY = pos.y;
+  }
+
+  function onPointerUp(e) {
+    if (!isDrawing) return;
+    isDrawing = false;
+    try {
+      el.signatureCanvas.releasePointerCapture(e.pointerId);
+    } catch (err) {}
+  }
+
+  function clearSignatureCanvas() {
+    if (!canvasCtx || !el.signatureCanvas) return;
+    const rect = el.signatureCanvasContainer.getBoundingClientRect();
+    canvasCtx.clearRect(0, 0, rect.width, rect.height);
+    hasDrawn = false;
+    if (el.canvasWatermark) el.canvasWatermark.style.opacity = '1';
+  }
+
+  // 캔버스 내용을 투명 배경 PNG 데이터 URL로 추출
+  function getSignatureDataUrl() {
+    if (!hasDrawn) return null;
+    return el.signatureCanvas.toDataURL('image/png');
+  }
+
+  // ==========================================================================
+  // [6] PDF 렌더링 헬퍼 (PDF.js 활용)
+  // ==========================================================================
+  async function renderPdfToContainer(pdfBytes, containerEl) {
+    if (!window.pdfjsLib || !pdfBytes) {
+      containerEl.innerHTML = '<div style="padding: 2rem; color: #64748b; text-align: center;">PDF 뷰어를 로드하는 중이거나 라이브러리를 연결할 수 없습니다.</div>';
+      return;
+    }
+
+    containerEl.innerHTML = '<div style="padding: 1.5rem; color: #3b82f6; text-align: center;">문서를 불러오는 중입니다...</div>';
+
+    try {
+      const loadingTask = pdfjsLib.getDocument({ data: pdfBytes.slice() });
+      const pdf = await loadingTask.promise;
+      containerEl.innerHTML = '';
+
+      for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+        const page = await pdf.getPage(pageNum);
+        const viewport = page.getViewport({ scale: 1.2 });
+
+        const canvasWrapper = document.createElement('div');
+        canvasWrapper.style.position = 'relative';
+        canvasWrapper.style.display = 'inline-block';
+        canvasWrapper.style.marginBottom = '1.25rem';
+
+        const canvas = document.createElement('canvas');
+        canvas.className = 'pdf-page-canvas';
+        const context = canvas.getContext('2d');
+        canvas.height = viewport.height;
+        canvas.width = viewport.width;
+
+        const renderContext = {
+          canvasContext: context,
+          viewport: viewport
+        };
+
+        canvasWrapper.appendChild(canvas);
+
+        // 첫 페이지 또는 서명 대상 페이지에 서명 영역 가이드 박스 표시 (사용자 안내용)
+        if (pageNum === Number(state.sigPosition.page || 1)) {
+          const guideBox = document.createElement('div');
+          guideBox.style.position = 'absolute';
+          // PDF 좌표(하단 기준)를 HTML 뷰포트 좌표(상단 기준)로 변환
+          const scaleRatio = viewport.width / 595.28; // 기준 뷰포트 배율
+          const boxX = state.sigPosition.x * scaleRatio;
+          const boxY = viewport.height - (state.sigPosition.y + state.sigPosition.height) * scaleRatio;
+          const boxW = state.sigPosition.width * scaleRatio;
+          const boxH = state.sigPosition.height * scaleRatio;
+
+          guideBox.style.left = `${boxX}px`;
+          guideBox.style.top = `${boxY}px`;
+          guideBox.style.width = `${boxW}px`;
+          guideBox.style.height = `${boxH}px`;
+          guideBox.style.border = '2px dashed #2563eb';
+          guideBox.style.backgroundColor = 'rgba(37, 99, 235, 0.08)';
+          guideBox.style.borderRadius = '4px';
+          guideBox.style.pointerEvents = 'none';
+          guideBox.style.display = 'flex';
+          guideBox.style.alignItems = 'center';
+          guideBox.style.justifyContent = 'center';
+          guideBox.style.fontSize = '11px';
+          guideBox.style.color = '#1d4ed8';
+          guideBox.style.fontWeight = 'bold';
+          guideBox.textContent = '✍️ 서명 날인 영역';
+          canvasWrapper.appendChild(guideBox);
+        }
+
+        containerEl.appendChild(canvasWrapper);
+        await page.render(renderContext).promise;
+      }
+    } catch (err) {
+      console.error('PDF rendering failed:', err);
+      containerEl.innerHTML = '<div style="padding: 2rem; color: #ef4444; text-align: center;">문서를 화면에 렌더링하지 못했습니다.</div>';
+    }
+  }
+
+  // ==========================================================================
+  // [7] 서명 합성 PDF 생성 (pdf-lib 활용)
+  // ==========================================================================
+  async function generateSignedPdf(signerName, signatureDataUrl) {
+    if (!window.PDFLib) {
+      throw new Error('PDFLib 라이브러리를 사용할 수 없습니다.');
+    }
+    const { PDFDocument, rgb, StandardFonts } = window.PDFLib;
+
+    // 양식 원본 바이트 로드
+    let templateBytes = state.pdfTemplate.bytes;
+    if (!templateBytes) {
+      templateBytes = await generateDefaultPdfTemplate();
+    }
+
+    const pdfDoc = await PDFDocument.load(templateBytes.slice());
+    const signatureImage = await pdfDoc.embedPng(signatureDataUrl);
+
+    const pages = pdfDoc.getPages();
+    const targetPageNum = Math.min(Math.max(1, Number(state.sigPosition.page || 1)), pages.length);
+    const targetPage = pages[targetPageNum - 1];
+
+    const posX = Number(state.sigPosition.x || 400);
+    const posY = Number(state.sigPosition.y || 120);
+    const posW = Number(state.sigPosition.width || 140);
+    const posH = Number(state.sigPosition.height || 60);
+
+    // 지정된 위치에 서명 이미지 날인
+    targetPage.drawImage(signatureImage, {
+      x: posX,
+      y: posY,
+      width: posW,
+      height: posH
+    });
+
+    // 선생님 성명 및 날짜 기재
+    try {
+      const font = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+      const fontRegular = await pdfDoc.embedFont(StandardFonts.Helvetica);
+      const dateStr = new Date().toLocaleDateString('ko-KR');
+
+      // 서명 이미지 바로 아래 또는 지정 위치에 기재
+      targetPage.drawText(`Signed by: ${signerName}`, {
+        x: posX,
+        y: Math.max(15, posY - 14),
+        size: 9,
+        font: font,
+        color: rgb(0.2, 0.2, 0.2)
+      });
+
+      targetPage.drawText(`Date: ${dateStr}`, {
+        x: posX,
+        y: Math.max(5, posY - 26),
+        size: 8,
+        font: fontRegular,
+        color: rgb(0.4, 0.4, 0.4)
+      });
+    } catch (fontErr) {
+      console.warn('Font annotation skipped:', fontErr);
+    }
+
+    const signedBytes = await pdfDoc.save();
+    return signedBytes;
+  }
+
+  // ==========================================================================
+  // [8] 사용자 화면 로직 (User View Controller)
+  // ==========================================================================
+  
+  // 1단계: 성명 확인 처리
+  function handleCheckSignerName() {
+    const rawInput = el.signerNameInput.value.trim();
+    if (!rawInput) {
+      showNameError('성명을 입력해 주세요.');
+      return;
+    }
+
+    // 이름 일치 검사 (공백 제거 후 비교)
+    const normalizedInput = rawInput.replace(/\s+/g, '');
+    const matchedSigner = state.signers.find(
+      s => s.replace(/\s+/g, '') === normalizedInput
+    );
+
+    if (matchedSigner) {
+      // 일치하는 경우: 요구사항 문구 “000 선생님 반갑습니다” 표기하고 서명란 제시
+      el.nameErrorAlert.style.display = 'none';
+      state.currentSignerName = matchedSigner;
+      proceedToSigningStep(matchedSigner);
+    } else {
+      // 일치하는 성명이 없으면: 요구사항 문구 “다시 입력해 주세요” 표기
+      showNameError('⚠️ 다시 입력해 주세요');
+    }
+  }
+
+  function showNameError(msg) {
+    el.nameErrorAlert.textContent = msg;
+    el.nameErrorAlert.style.display = 'block';
+    el.signerNameInput.focus();
+  }
+
+  // 2단계: 서명 화면으로 전환
+  async function proceedToSigningStep(teacherName) {
+    el.userNameStep.style.display = 'none';
+    el.userSigningStep.style.display = 'block';
+    el.userCompleteStep.style.display = 'none';
+
+    // 요구사항: “000 선생님 반갑습니다” 표기
+    el.teacherGreetingTitle.textContent = `${teacherName} 선생님 반갑습니다`;
+    el.docFileNameBadge.textContent = state.pdfTemplate.name || '표준 양식 문서';
+
+    // 서명할 양식 문서 미리보기 렌더링
+    if (state.pdfTemplate.bytes) {
+      renderPdfToContainer(state.pdfTemplate.bytes, el.userDocPagesContainer);
+    }
+
+    // 캔버스 초기화
+    setTimeout(() => {
+      initSignatureCanvas();
+    }, 100);
+  }
+
+  // 성명 다시 입력하기 버튼
+  function handleReenterName() {
+    el.userSigningStep.style.display = 'none';
+    el.userNameStep.style.display = 'block';
+    el.signerNameInput.value = '';
+    el.signerNameInput.focus();
+    el.nameErrorAlert.style.display = 'none';
+    state.currentSignerName = null;
+  }
+
+  // 서명 제출 처리
+  async function handleSubmitSignature() {
+    if (!hasDrawn) {
+      showToast('⚠️ 서명란에 서명을 먼저 작성해 주세요.');
+      return;
+    }
+
+    if (!state.currentSignerName) {
+      showToast('⚠️ 서명자 정보가 확인되지 않았습니다.');
+      return;
+    }
+
+    const teacherName = state.currentSignerName;
+    const signatureDataUrl = getSignatureDataUrl();
+
+    el.btnSubmitSign.disabled = true;
+    el.btnSubmitSign.textContent = '⏳ 서명 처리 중...';
+
+    try {
+      // PDF에 서명 합성 날인
+      const signedPdfBytes = await generateSignedPdf(teacherName, signatureDataUrl);
+      const signedAt = new Date().toLocaleString('ko-KR');
+
+      // 저장 레코드 구성
+      const record = {
+        name: teacherName,
+        signedAt: signedAt,
+        signatureImage: signatureDataUrl,
+        pdfBytes: signedPdfBytes
+      };
+
+      state.signatures[teacherName] = record;
+      await saveSignatureToDB(record);
+
+      // 사용자 완료 화면 전환
+      el.userSigningStep.style.display = 'none';
+      el.userCompleteStep.style.display = 'block';
+      el.completedTeacherName.textContent = teacherName;
+
+      // 관리자 실시간 테이블 자동 갱신
+      renderProgressTable();
+      renderCompleteTable();
+      updateDashboardStats();
+
+      showToast(`🎉 ${teacherName} 선생님의 서명이 성공적으로 제출되었습니다!`);
+    } catch (err) {
+      console.error('Signature submission error:', err);
+      showToast('❌ 서명 제출 중 오류가 발생했습니다. 다시 시도해 주세요.');
+    } finally {
+      el.btnSubmitSign.disabled = false;
+      el.btnSubmitSign.textContent = '✅ 제출';
+    }
+  }
+
+  // 본인 서명된 PDF 다운로드
+  function handleDownloadMySignedPdf() {
+    const teacherName = state.currentSignerName;
+    const record = state.signatures[teacherName];
+    if (!record || !record.pdfBytes) {
+      showToast('서명된 문서 데이터를 찾을 수 없습니다.');
+      return;
+    }
+    const filename = `[서명완료]_${teacherName}_${state.pdfTemplate.name || '서약서'}`;
+    downloadPdfBytes(record.pdfBytes, filename);
+  }
+
+  // 첫 화면으로 돌아가기
+  function handleRestartUserFlow() {
+    el.userCompleteStep.style.display = 'none';
+    el.userNameStep.style.display = 'block';
+    el.signerNameInput.value = '';
+    el.signerNameInput.focus();
+    clearSignatureCanvas();
+    state.currentSignerName = null;
+  }
+
+  // ==========================================================================
+  // [9] 관리자 로그인 및 화면 제어 (Admin Controller)
+  // ==========================================================================
+  
+  // 상단 우측 인라인 관리자 로그인 처리
+  function handleHeaderLogin(e) {
+    if (e) e.preventDefault();
+    const inputId = el.headerAdminId ? el.headerAdminId.value.trim() : '';
+    const inputPw = el.headerAdminPw ? el.headerAdminPw.value : '';
+
+    const targetId = window.APP_CONFIG?.adminId || 'admin';
+    const targetPw = window.APP_CONFIG?.adminPassword || 'admin4441#';
+
+    if (inputId === targetId && inputPw === targetPw) {
+      state.isAdminLoggedIn = true;
+      try { sessionStorage.setItem('yewon_admin_logged_in', 'true'); } catch (err) {}
+      updateLoginHeaderUI(true);
+      switchToAdminView();
+      showToast('🔓 관리자로 로그인되었습니다.');
+    } else {
+      showToast('⚠️ 관리자 아이디 또는 비밀번호가 올바르지 않습니다.');
+      if (el.headerAdminPw) {
+        el.headerAdminPw.style.borderColor = '#ef4444';
+        el.headerAdminPw.style.boxShadow = '0 0 0 2px rgba(239, 68, 68, 0.2)';
+        setTimeout(() => {
+          if (el.headerAdminPw) {
+            el.headerAdminPw.style.borderColor = '';
+            el.headerAdminPw.style.boxShadow = '';
+          }
+        }, 1800);
+        el.headerAdminPw.value = '';
+        el.headerAdminPw.focus();
+      }
+    }
+  }
+
+  // 관리자 로그아웃
+  function handleAdminLogout() {
+    state.isAdminLoggedIn = false;
+    try { sessionStorage.removeItem('yewon_admin_logged_in'); } catch (err) {}
+    updateLoginHeaderUI(false);
+    switchToUserView();
+    showToast('🔒 관리자 로그아웃되었습니다.');
+  }
+
+  // 상단 우측 UI 상태 갱신 (로그인 전/후 전환)
+  function updateLoginHeaderUI(isLoggedIn) {
+    if (isLoggedIn) {
+      if (el.headerAdminLoginForm) el.headerAdminLoginForm.style.display = 'none';
+      if (el.headerAdminLoggedInBar) el.headerAdminLoggedInBar.style.display = 'inline-flex';
+      if (el.currentRoleBadge) {
+        el.currentRoleBadge.textContent = '관리자 모드';
+        el.currentRoleBadge.style.background = '#fef3c7';
+        el.currentRoleBadge.style.color = '#b45309';
+      }
+    } else {
+      if (el.headerAdminLoginForm) el.headerAdminLoginForm.style.display = 'flex';
+      if (el.headerAdminLoggedInBar) el.headerAdminLoggedInBar.style.display = 'none';
+      if (el.headerAdminPw) el.headerAdminPw.value = '';
+      if (el.currentRoleBadge) {
+        el.currentRoleBadge.textContent = '사용자 모드';
+        el.currentRoleBadge.style.background = 'var(--primary-light)';
+        el.currentRoleBadge.style.color = 'var(--primary)';
+      }
+    }
+  }
+
+  function switchToAdminView() {
+    el.userViewSection.style.display = 'none';
+    el.adminViewSection.style.display = 'block';
+    if (el.btnSwitchToAdmin) el.btnSwitchToAdmin.style.display = 'none';
+    if (el.btnSwitchToUser) el.btnSwitchToUser.style.display = 'inline-flex';
+    if (el.btnAdminLogout) el.btnAdminLogout.style.display = 'inline-flex';
+
+    if (el.currentRoleBadge) {
+      el.currentRoleBadge.textContent = '관리자 모드';
+      el.currentRoleBadge.style.background = '#fef3c7';
+      el.currentRoleBadge.style.color = '#b45309';
+    }
+
+    // 관리자 뷰 로드
+    renderSignerTags();
+    renderProgressTable();
+    renderCompleteTable();
+    updateDashboardStats();
+    syncConfigInputs();
+  }
+
+  function switchToUserView() {
+    el.adminViewSection.style.display = 'none';
+    el.userViewSection.style.display = 'block';
+
+    if (state.isAdminLoggedIn) {
+      if (el.btnSwitchToAdmin) el.btnSwitchToAdmin.style.display = 'inline-flex';
+      if (el.btnSwitchToUser) el.btnSwitchToUser.style.display = 'none';
+      if (el.currentRoleBadge) {
+        el.currentRoleBadge.textContent = '사용자 모드 (관리자 접속 중)';
+      }
+    } else {
+      if (el.currentRoleBadge) {
+        el.currentRoleBadge.textContent = '사용자 모드';
+        el.currentRoleBadge.style.background = 'var(--primary-light)';
+        el.currentRoleBadge.style.color = 'var(--primary)';
+      }
+    }
+
+    if (!state.currentSignerName) {
+      el.userNameStep.style.display = 'block';
+      el.userSigningStep.style.display = 'none';
+      el.userCompleteStep.style.display = 'none';
+    }
+  }
+
+  // 모달 로그인 (기존 모달 호환용)
+  function openAdminLoginModal() {
+    if (el.adminIdInput) el.adminIdInput.value = '';
+    if (el.adminPwInput) el.adminPwInput.value = '';
+    if (el.loginErrorAlert) el.loginErrorAlert.style.display = 'none';
+    if (el.adminLoginModal) el.adminLoginModal.style.display = 'flex';
+    if (el.adminIdInput) el.adminIdInput.focus();
+  }
+
+  function closeAdminLoginModal() {
+    if (el.adminLoginModal) el.adminLoginModal.style.display = 'none';
+  }
+
+  function handleAdminLogin(e) {
+    if (e) e.preventDefault();
+    const inputId = (el.adminIdInput ? el.adminIdInput.value : '').trim();
+    const inputPw = el.adminPwInput ? el.adminPwInput.value : '';
+
+    const targetId = window.APP_CONFIG?.adminId || 'admin';
+    const targetPw = window.APP_CONFIG?.adminPassword || 'admin4441#';
+
+    if (inputId === targetId && inputPw === targetPw) {
+      state.isAdminLoggedIn = true;
+      try { sessionStorage.setItem('yewon_admin_logged_in', 'true'); } catch (err) {}
+      updateLoginHeaderUI(true);
+      closeAdminLoginModal();
+      switchToAdminView();
+      showToast('🔓 관리자로 로그인되었습니다.');
+    } else {
+      if (el.loginErrorAlert) el.loginErrorAlert.style.display = 'block';
+      if (el.adminPwInput) {
+        el.adminPwInput.value = '';
+        el.adminPwInput.focus();
+      }
+    }
+  }
+
+  // 관리자 탭 전환 ([시작], [진행], [완료])
+  function handleTabClick(btn) {
+    const targetTabId = btn.getAttribute('data-tab');
+
+    el.tabButtons.forEach(b => b.classList.remove('active'));
+    el.tabContents.forEach(c => c.classList.remove('active'));
+
+    btn.classList.add('active');
+    const targetContent = document.getElementById(targetTabId);
+    if (targetContent) {
+      targetContent.classList.add('active');
+    }
+
+    if (targetTabId === 'tab-progress') {
+      renderProgressTable();
+      updateDashboardStats();
+    } else if (targetTabId === 'tab-complete') {
+      renderCompleteTable();
+    }
+  }
+
+  // ==========================================================================
+  // [10] 관리자 [시작] 메뉴 로직 (양식 업로드 & 대상자 관리)
+  // ==========================================================================
+  
+  // PDF 양식 파일 업로드 처리
+  async function handlePdfUpload(file) {
+    if (!file || file.type !== 'application/pdf') {
+      showToast('⚠️ PDF 형식의 파일만 업로드할 수 있습니다.');
+      return;
+    }
+
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const bytes = new Uint8Array(arrayBuffer);
+
+      state.pdfTemplate.name = file.name;
+      state.pdfTemplate.bytes = bytes;
+      el.currentFormName.textContent = file.name;
+
+      // IndexedDB에 저장
+      await saveFileToDB('activeTemplate', bytes, file.name);
+
+      showToast(`📄 양식 파일 "${file.name}" 등록이 완료되었습니다.`);
+
+      // 사용자 뷰 미리보기 즉시 갱신
+      if (el.userDocPagesContainer) {
+        renderPdfToContainer(bytes, el.userDocPagesContainer);
+      }
+    } catch (err) {
+      console.error('File upload error:', err);
+      showToast('❌ 파일 처리 중 오류가 발생했습니다.');
+    }
+  }
+
+  // 기본 양식으로 복원
+  async function handleResetToDefaultForm() {
+    if (!confirm('기본 표준 서약서 양식으로 복원하시겠습니까?')) return;
+    const defaultBytes = await generateDefaultPdfTemplate();
+    state.pdfTemplate.name = '기본 표준 서약서 양식.pdf';
+    state.pdfTemplate.bytes = defaultBytes;
+    el.currentFormName.textContent = state.pdfTemplate.name;
+    await saveFileToDB('activeTemplate', defaultBytes, state.pdfTemplate.name);
+    showToast('기본 서약서 양식으로 복원되었습니다.');
+    if (el.userDocPagesContainer) {
+      renderPdfToContainer(defaultBytes, el.userDocPagesContainer);
+    }
+  }
+
+  // 등록된 선생님 대상자 태그 렌더링
+  function renderSignerTags() {
+    el.signerTagsList.innerHTML = '';
+    el.signerCountBadge.textContent = state.signers.length;
+
+    if (state.signers.length === 0) {
+      el.signerTagsList.innerHTML = '<span style="color: #94a3b8; font-size: 0.85rem;">등록된 서명 대상자가 없습니다. 상단에서 선생님 성명을 추가해 주세요.</span>';
+      return;
+    }
+
+    state.signers.forEach((name, idx) => {
+      const tag = document.createElement('div');
+      tag.className = 'signer-tag';
+      tag.innerHTML = `
+        <span>👤 ${name} 선생님</span>
+        <button type="button" class="remove-signer-btn" data-index="${idx}" title="삭제">&times;</button>
+      `;
+      el.signerTagsList.appendChild(tag);
+    });
+
+    // 삭제 버튼 이벤트 바인딩
+    el.signerTagsList.querySelectorAll('.remove-signer-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const index = parseInt(e.currentTarget.getAttribute('data-index'), 10);
+        state.signers.splice(index, 1);
+        saveLocalSettings();
+        renderSignerTags();
+        renderProgressTable();
+        updateDashboardStats();
+      });
+    });
+  }
+
+  // 대상자 추가
+  function handleAddSigners() {
+    const rawInput = el.newSignerInput.value.trim();
+    if (!rawInput) return;
+
+    // 쉼표, 줄바꿈, 띄어쓰기 구분 처리
+    const names = rawInput
+      .split(/[,/\n]+/)
+      .map(n => n.trim())
+      .filter(n => n.length > 0);
+
+    let addedCount = 0;
+    names.forEach(name => {
+      // "선생님" 호칭이 붙어있으면 제거하고 성명만 저장
+      const cleanName = name.replace(/선생님$/, '').trim();
+      if (cleanName && !state.signers.includes(cleanName)) {
+        state.signers.push(cleanName);
+        addedCount++;
+      }
+    });
+
+    if (addedCount > 0) {
+      saveLocalSettings();
+      renderSignerTags();
+      renderProgressTable();
+      updateDashboardStats();
+      el.newSignerInput.value = '';
+      showToast(`${addedCount}명의 선생님이 등록되었습니다.`);
+    } else {
+      showToast('이미 등록되어 있거나 유효하지 않은 이름입니다.');
+    }
+  }
+
+  // 전체 대상자 비우기
+  function handleClearAllSigners() {
+    if (confirm('등록된 대상자 명단을 모두 비우시겠습니까?')) {
+      state.signers = [];
+      saveLocalSettings();
+      renderSignerTags();
+      renderProgressTable();
+      updateDashboardStats();
+      showToast('대상자 명단이 비워졌습니다.');
+    }
+  }
+
+  // 서명 위치 및 설정값 저장
+  function handleSaveStartConfig() {
+    state.sigPosition.page = parseInt(el.sigPageInput.value, 10) || 1;
+    state.sigPosition.x = parseInt(el.sigXInput.value, 10) || 400;
+    state.sigPosition.y = parseInt(el.sigYInput.value, 10) || 120;
+    state.sigPosition.width = parseInt(el.sigWidthInput.value, 10) || 140;
+    state.sigPosition.height = parseInt(el.sigHeightInput.value, 10) || 60;
+
+    saveLocalSettings();
+    showToast('💾 서명 위치 및 환경 설정이 저장되었습니다.');
+
+    // 미리보기 갱신
+    if (state.pdfTemplate.bytes && el.userDocPagesContainer) {
+      renderPdfToContainer(state.pdfTemplate.bytes, el.userDocPagesContainer);
+    }
+  }
+
+  function syncConfigInputs() {
+    el.sigPageInput.value = state.sigPosition.page;
+    el.sigXInput.value = state.sigPosition.x;
+    el.sigYInput.value = state.sigPosition.y;
+    el.sigWidthInput.value = state.sigPosition.width;
+    el.sigHeightInput.value = state.sigPosition.height;
+  }
+
+  // ==========================================================================
+  // [11] 관리자 [진행] 메뉴 로직 (실시간 서명 현황 확인 및 게시)
+  // ==========================================================================
+  function renderProgressTable() {
+    el.progressTableBody.innerHTML = '';
+
+    if (state.signers.length === 0) {
+      el.progressTableBody.innerHTML = `
+        <tr>
+          <td colspan="6" style="text-align: center; color: #94a3b8; padding: 2.5rem;">
+            등록된 서명 대상자가 없습니다. [시작] 메뉴에서 선생님을 추가해 주세요.
+          </td>
+        </tr>
+      `;
+      return;
+    }
+
+    state.signers.forEach((name, index) => {
+      const record = state.signatures[name];
+      const isSigned = !!record;
+
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${index + 1}</td>
+        <td><strong>${name}</strong> 선생님</td>
+        <td>
+          ${isSigned 
+            ? '<span class="badge badge-success">✓ 서명 완료</span>' 
+            : '<span class="badge badge-pending">대기 중</span>'}
+        </td>
+        <td>${isSigned ? record.signedAt : '-'}</td>
+        <td style="text-align: center;">
+          ${isSigned && record.signatureImage
+            ? `<img src="${record.signatureImage}" class="sign-thumbnail" data-name="${name}" alt="서명" title="클릭하여 확대">`
+            : '<span style="color: #cbd5e1; font-size: 0.85rem;">(미작성)</span>'}
+        </td>
+        <td style="text-align: right;">
+          ${isSigned
+            ? `<button type="button" class="nav-link-btn btn-reset-single-sign" data-name="${name}" style="color: #ef4444; border-color: #fecaca; font-size: 0.8rem; padding: 0.3rem 0.6rem;">서명 초기화</button>`
+            : `<button type="button" class="nav-link-btn btn-copy-single-link" data-name="${name}" style="font-size: 0.8rem; padding: 0.3rem 0.6rem;">링크 복사</button>`}
+        </td>
+      `;
+      el.progressTableBody.appendChild(tr);
+    });
+
+    // 썸네일 클릭 시 확대 보기
+    el.progressTableBody.querySelectorAll('.sign-thumbnail').forEach(img => {
+      img.addEventListener('click', (e) => {
+        const name = e.currentTarget.getAttribute('data-name');
+        openSignatureModal(name);
+      });
+    });
+
+    // 개별 서명 초기화 버튼
+    el.progressTableBody.querySelectorAll('.btn-reset-single-sign').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        const name = e.currentTarget.getAttribute('data-name');
+        if (confirm(`${name} 선생님의 서명을 초기화하시겠습니까?`)) {
+          delete state.signatures[name];
+          await removeSignatureFromDB(name);
+          renderProgressTable();
+          renderCompleteTable();
+          updateDashboardStats();
+          showToast(`${name} 선생님의 서명이 초기화되었습니다.`);
+        }
+      });
+    });
+
+    // 개별 서명 링크 복사 버튼
+    el.progressTableBody.querySelectorAll('.btn-copy-single-link').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const name = e.currentTarget.getAttribute('data-name');
+        copySignerLink(name);
+      });
+    });
+  }
+
+  function updateDashboardStats() {
+    const total = state.signers.length;
+    let completed = 0;
+
+    state.signers.forEach(name => {
+      if (state.signatures[name]) completed++;
+    });
+
+    const pending = total - completed;
+    const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+    el.statTotalSigners.textContent = total;
+    el.statCompletedSigners.textContent = completed;
+    el.statPendingSigners.textContent = pending;
+    el.statProgressPercent.textContent = `${percent}%`;
+  }
+
+  // 사용자 서명 링크 복사
+  function copySignerLink(specificName = null) {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('admin');
+    if (specificName) {
+      url.searchParams.set('name', specificName);
+    } else {
+      url.searchParams.delete('name');
+    }
+
+    navigator.clipboard.writeText(url.toString()).then(() => {
+      showToast(specificName ? `🔗 ${specificName} 선생님 전용 서명 링크가 복사되었습니다!` : '🔗 사용자 서명 링크가 복사되었습니다!');
+    }).catch(() => {
+      prompt('서명 링크 주소입니다. 복사하여 전달해 주세요:', url.toString());
+    });
+  }
+
+  // ==========================================================================
+  // [12] 관리자 [완료] 메뉴 로직 (PDF 다운로드 및 ZIP 일괄 압축)
+  // ==========================================================================
+  function renderCompleteTable() {
+    el.completeTableBody.innerHTML = '';
+
+    const completedSigners = state.signers.filter(name => !!state.signatures[name]);
+
+    if (completedSigners.length === 0) {
+      el.completeTableBody.innerHTML = `
+        <tr>
+          <td colspan="5" style="text-align: center; color: #94a3b8; padding: 2.5rem;">
+            서명이 완료된 문서가 아직 없습니다.
+          </td>
+        </tr>
+      `;
+      return;
+    }
+
+    completedSigners.forEach((name, index) => {
+      const record = state.signatures[name];
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${index + 1}</td>
+        <td><strong>${name}</strong> 선생님</td>
+        <td>${record.signedAt}</td>
+        <td>${state.pdfTemplate.name || '서약서 양식.pdf'}</td>
+        <td style="text-align: right;">
+          <div style="display: inline-flex; gap: 0.4rem;">
+            <button type="button" class="nav-link-btn btn-preview-signed-pdf" data-name="${name}">
+              👁️ 미리보기
+            </button>
+            <button type="button" class="nav-link-btn primary btn-download-signed-pdf" data-name="${name}">
+              📥 PDF 다운로드
+            </button>
+          </div>
+        </td>
+      `;
+      el.completeTableBody.appendChild(tr);
+    });
+
+    // 개별 PDF 다운로드 이벤트
+    el.completeTableBody.querySelectorAll('.btn-download-signed-pdf').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const name = e.currentTarget.getAttribute('data-name');
+        const record = state.signatures[name];
+        if (record && record.pdfBytes) {
+          const filename = `[서명완료]_${name}_${state.pdfTemplate.name || '서약서'}`;
+          downloadPdfBytes(record.pdfBytes, filename);
+        }
+      });
+    });
+
+    // 개별 PDF 미리보기 이벤트
+    el.completeTableBody.querySelectorAll('.btn-preview-signed-pdf').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const name = e.currentTarget.getAttribute('data-name');
+        const record = state.signatures[name];
+        if (record && record.pdfBytes) {
+          openPdfPreviewModal(`[서명완료] ${name} 선생님 서명 문서`, record.pdfBytes);
+        }
+      });
+    });
+  }
+
+  // 전체 완료 PDF 일괄 다운로드 (ZIP)
+  async function handleDownloadAllPdfZip() {
+    const completedSigners = state.signers.filter(name => !!state.signatures[name]);
+    if (completedSigners.length === 0) {
+      showToast('⚠️ 다운로드할 서명 완료 문서가 없습니다.');
+      return;
+    }
+
+    if (!window.JSZip) {
+      showToast('JSZip 압축 라이브러리를 로드하는 중입니다...');
+      return;
+    }
+
+    el.btnDownloadAllPdfZip.disabled = true;
+    el.btnDownloadAllPdfZip.textContent = '⏳ 압축 파일 생성 중...';
+
+    try {
+      const zip = new JSZip();
+      const folder = zip.folder('예원전자서명_완료문서모음');
+
+      completedSigners.forEach(name => {
+        const record = state.signatures[name];
+        if (record && record.pdfBytes) {
+          const fileName = `[서명완료]_${name}_${state.pdfTemplate.name || '서약서'}`;
+          folder.file(fileName, record.pdfBytes);
+        }
+      });
+
+      const zipBlob = await zip.generateAsync({ type: 'blob' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(zipBlob);
+      link.download = `[전체완료]_예원전자서명_문서모음_${new Date().toISOString().slice(0, 10)}.zip`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+
+      showToast(`📦 총 ${completedSigners.length}건의 서명 완료 문서를 일괄 다운로드했습니다.`);
+    } catch (err) {
+      console.error('ZIP generation error:', err);
+      showToast('❌ 압축 파일 생성 중 오류가 발생했습니다.');
+    } finally {
+      el.btnDownloadAllPdfZip.disabled = false;
+      el.btnDownloadAllPdfZip.textContent = '📦 전체 완료 문서 일괄 다운로드 (ZIP)';
+    }
+  }
+
+  // PDF 바이트 다운로드 헬퍼
+  function downloadPdfBytes(bytes, filename) {
+    if (!filename.endsWith('.pdf')) filename += '.pdf';
+    const blob = new Blob([bytes], { type: 'application/pdf' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(link.href);
+    showToast(`📥 ${filename} 다운로드를 시작했습니다.`);
+  }
+
+  // ==========================================================================
+  // [13] 모달 창 제어 (서명 확대 모달 & PDF 미리보기 모달)
+  // ==========================================================================
+  function openSignatureModal(name) {
+    const record = state.signatures[name];
+    if (!record) return;
+
+    el.sigModalTitle.textContent = `${name} 선생님 전자서명 원본`;
+    el.sigModalDate.textContent = `서명 일시: ${record.signedAt}`;
+    el.sigModalImage.src = record.signatureImage;
+    el.signatureViewModal.style.display = 'flex';
+  }
+
+  function closeSignatureModal() {
+    el.signatureViewModal.style.display = 'none';
+  }
+
+  function openPdfPreviewModal(title, pdfBytes) {
+    el.pdfPreviewModalTitle.textContent = title;
+    el.pdfPreviewModal.style.display = 'flex';
+    renderPdfToContainer(pdfBytes, el.modalPdfPagesContainer);
+  }
+
+  function closePdfPreviewModal() {
+    el.pdfPreviewModal.style.display = 'none';
+    el.modalPdfPagesContainer.innerHTML = '';
+  }
+
+  // ==========================================================================
+  // [14] 이벤트 리스너 등록
+  // ==========================================================================
+  function setupEventListeners() {
+    // 헤더 및 네비게이션
+    if (el.brandLogo) {
+      el.brandLogo.addEventListener('click', (e) => {
+        e.preventDefault();
+        switchToUserView();
+      });
+    }
+
+    // 상단 우측 아담한 관리자 로그인 폼 제출
+    if (el.headerAdminLoginForm) {
+      el.headerAdminLoginForm.addEventListener('submit', handleHeaderLogin);
+    }
+
+    // 관리자 바 버튼 (사용자 화면 전환, 관리자 대시보드 복귀, 로그아웃)
+    if (el.btnSwitchToUser) el.btnSwitchToUser.addEventListener('click', switchToUserView);
+    if (el.btnSwitchToAdmin) el.btnSwitchToAdmin.addEventListener('click', switchToAdminView);
+    if (el.btnAdminLogout) el.btnAdminLogout.addEventListener('click', handleAdminLogout);
+
+    // 모달 관리자 로그인 (호환)
+    if (el.btnAdminAccess) el.btnAdminAccess.addEventListener('click', openAdminLoginModal);
+    if (el.btnCloseLoginModal) el.btnCloseLoginModal.addEventListener('click', closeAdminLoginModal);
+    if (el.adminLoginForm) el.adminLoginForm.addEventListener('submit', handleAdminLogin);
+
+    // 관리자 탭
+    el.tabButtons.forEach(btn => {
+      btn.addEventListener('click', () => handleTabClick(btn));
+    });
+
+    // 관리자: [시작] 메뉴
+    if (el.pdfDropzone && el.pdfFileInput) {
+      el.pdfDropzone.addEventListener('click', () => el.pdfFileInput.click());
+      el.pdfFileInput.addEventListener('change', (e) => {
+        if (e.target.files && e.target.files[0]) {
+          handlePdfUpload(e.target.files[0]);
+        }
+      });
+
+      // 드래그 앤 드롭
+      el.pdfDropzone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        el.pdfDropzone.style.borderColor = '#1d4ed8';
+        el.pdfDropzone.style.background = '#e0e7ff';
+      });
+      el.pdfDropzone.addEventListener('dragleave', () => {
+        el.pdfDropzone.style.borderColor = '';
+        el.pdfDropzone.style.background = '';
+      });
+      el.pdfDropzone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        el.pdfDropzone.style.borderColor = '';
+        el.pdfDropzone.style.background = '';
+        if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+          handlePdfUpload(e.dataTransfer.files[0]);
+        }
+      });
+    }
+
+    if (el.btnPreviewCurrentForm) {
+      el.btnPreviewCurrentForm.addEventListener('click', () => {
+        if (state.pdfTemplate.bytes) {
+          openPdfPreviewModal(`양식 미리보기: ${state.pdfTemplate.name}`, state.pdfTemplate.bytes);
+        } else {
+          showToast('미리 볼 양식이 아직 준비되지 않았습니다.');
+        }
+      });
+    }
+    if (el.btnResetToDefaultForm) el.btnResetToDefaultForm.addEventListener('click', handleResetToDefaultForm);
+
+    if (el.btnAddSigners) el.btnAddSigners.addEventListener('click', handleAddSigners);
+    if (el.newSignerInput) {
+      el.newSignerInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') handleAddSigners();
+      });
+    }
+    if (el.btnClearAllSigners) el.btnClearAllSigners.addEventListener('click', handleClearAllSigners);
+    if (el.btnSaveStartConfig) el.btnSaveStartConfig.addEventListener('click', handleSaveStartConfig);
+
+    // 관리자: [진행] 메뉴
+    if (el.btnCopyUserSignLink) el.btnCopyUserSignLink.addEventListener('click', () => copySignerLink());
+    if (el.btnRefreshProgress) {
+      el.btnRefreshProgress.addEventListener('click', () => {
+        renderProgressTable();
+        updateDashboardStats();
+        showToast('🔄 서명 현황이 새로고침되었습니다.');
+      });
+    }
+
+    // 관리자: [완료] 메뉴
+    if (el.btnDownloadAllPdfZip) el.btnDownloadAllPdfZip.addEventListener('click', handleDownloadAllPdfZip);
+
+    // 사용자 화면: 성명 입력 및 서명
+    if (el.btnCheckName) el.btnCheckName.addEventListener('click', handleCheckSignerName);
+    if (el.signerNameInput) {
+      el.signerNameInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') handleCheckSignerName();
+      });
+    }
+    if (el.btnReenterName) el.btnReenterName.addEventListener('click', handleReenterName);
+
+    // 요구사항 버튼 2개: [다시 하기], [제출]
+    if (el.btnResetSign) el.btnResetSign.addEventListener('click', clearSignatureCanvas);
+    if (el.btnSubmitSign) el.btnSubmitSign.addEventListener('click', handleSubmitSignature);
+
+    // 완료 화면
+    if (el.btnDownloadMySignedPdf) el.btnDownloadMySignedPdf.addEventListener('click', handleDownloadMySignedPdf);
+    if (el.btnRestartUserFlow) el.btnRestartUserFlow.addEventListener('click', handleRestartUserFlow);
+
+    // 모달 닫기
+    if (el.btnCloseSignatureModal) el.btnCloseSignatureModal.addEventListener('click', closeSignatureModal);
+    if (el.btnCloseSigModalBtn) el.btnCloseSigModalBtn.addEventListener('click', closeSignatureModal);
+    if (el.btnClosePdfPreviewModal) el.btnClosePdfPreviewModal.addEventListener('click', closePdfPreviewModal);
+
+    // 바깥 클릭 시 모달 닫기
+    window.addEventListener('click', (e) => {
+      if (e.target === el.adminLoginModal) closeAdminLoginModal();
+      if (e.target === el.signatureViewModal) closeSignatureModal();
+      if (e.target === el.pdfPreviewModal) closePdfPreviewModal();
+    });
+
+    // 창 크기 변경 시 서명 캔버스 재조정
+    window.addEventListener('resize', () => {
+      if (el.userSigningStep && el.userSigningStep.style.display !== 'none' && !hasDrawn) {
+        initSignatureCanvas();
+      }
+    });
+  }
+
+  // ==========================================================================
+  // [15] 시스템 초기화 및 시작
+  // ==========================================================================
+  async function bootstrap() {
+    // 1. 이벤트 리스너 즉시 바인딩 (UI 클릭 및 로그인이 절대 먹통되지 않도록 최우선 실행)
+    setupEventListeners();
+    loadLocalSettings();
+    renderSignerTags();
+    renderProgressTable();
+    renderCompleteTable();
+    updateDashboardStats();
+    syncConfigInputs();
+
+    // 2. 관리자 세션 복원 (새로고침 시 유지)
+    try {
+      if (sessionStorage.getItem('yewon_admin_logged_in') === 'true') {
+        state.isAdminLoggedIn = true;
+        updateLoginHeaderUI(true);
+        switchToAdminView();
+      }
+    } catch (err) {}
+
+    // 3. 비동기 데이터베이스 및 양식 로드 (오류 발생해도 UI 동작 보장)
+    try {
+      await initDB();
+
+      // 저장된 양식 파일 불러오기
+      const savedTemplate = await getFileFromDB('activeTemplate');
+      if (savedTemplate && savedTemplate.data) {
+        state.pdfTemplate.name = savedTemplate.name || '등록된 양식.pdf';
+        state.pdfTemplate.bytes = savedTemplate.data;
+        if (el.currentFormName) el.currentFormName.textContent = state.pdfTemplate.name;
+      } else {
+        // 기본 템플릿 생성
+        const defaultBytes = await generateDefaultPdfTemplate();
+        if (defaultBytes) {
+          state.pdfTemplate.name = '기본 표준 서약서 양식 (내장 템플릿).pdf';
+          state.pdfTemplate.bytes = defaultBytes;
+          if (el.currentFormName) el.currentFormName.textContent = state.pdfTemplate.name;
+          await saveFileToDB('activeTemplate', defaultBytes, state.pdfTemplate.name);
+        }
+      }
+
+      // 저장된 서명 레코드들 불러오기
+      const savedSignatures = await getAllSignaturesFromDB();
+      savedSignatures.forEach(rec => {
+        state.signatures[rec.name] = rec;
+      });
+
+      renderProgressTable();
+      renderCompleteTable();
+      updateDashboardStats();
+    } catch (dbErr) {
+      console.warn('Bootstrap background storage load skipped:', dbErr);
+    }
+
+    // 4. URL 파라미터 확인 (예: ?name=홍길동 or ?admin=true)
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      const directName = urlParams.get('name');
+      if (directName && el.signerNameInput) {
+        el.signerNameInput.value = directName;
+        handleCheckSignerName();
+      } else if (urlParams.get('admin') === 'true') {
+        if (el.headerAdminPw) el.headerAdminPw.focus();
+      }
+    } catch (paramErr) {}
+  }
+
+  // DOM 로드 완료 후 실행
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bootstrap);
+  } else {
+    bootstrap();
+  }
+
+})();
