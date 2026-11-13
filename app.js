@@ -24,11 +24,11 @@
     signers: [...(window.APP_CONFIG?.defaultSigners || ['홍길동', '김영희', '이철수', '박민수', '정수진'])],
     signatures: {}, // name -> { name, signedAt, signatureImage, pdfBlob }
     isAutoFormMode: true,
-    autoFormTitle: localStorage.getItem('yewon_auto_title') || '2026학년도 교직원 보안 및 청렴 서약서',
-    autoFormDept: localStorage.getItem('yewon_auto_dept') || '교무기획부 / 담당자: 교사 홍길동',
+    autoFormTitle: localStorage.getItem('yewon_auto_title') || '',
+    autoFormDept: localStorage.getItem('yewon_auto_dept') || '',
     autoFormPositions: {}, // name -> { page, x, y, width, height }
     pdfTemplate: {
-      name: '2026학년도 교직원 보안 및 청렴 서약서.pdf',
+      name: '서명 양식.pdf',
       bytes: null
     },
     sigPosition: {
@@ -292,8 +292,8 @@
     }
     const { PDFDocument } = window.PDFLib;
 
-    const docTitle = (title || state.autoFormTitle || '2026학년도 교직원 보안 및 청렴 서약서').trim();
-    const docDept = (dept !== undefined ? dept : state.autoFormDept || '').trim();
+    const docTitle = (title !== undefined ? title : (state.autoFormTitle || '')).trim();
+    const docDept = (dept !== undefined ? dept : (state.autoFormDept || '')).trim();
     const signerList = Array.isArray(signers) && signers.length > 0 
       ? signers 
       : (state.signers && state.signers.length > 0 ? state.signers : ['홍길동', '김영희', '이철수', '박민수', '정수진']);
@@ -316,13 +316,15 @@
     ctx.fillStyle = '#2563eb';
     ctx.fillRect(36 * scale, 24 * scale, 523.28 * scale, 3 * scale);
 
-    // 2. 문서 제목 (작성되는 문서 상단 중앙에 크게 표기)
-    ctx.fillStyle = '#0f172a';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.font = `bold ${Math.round(18.5 * scale)}px "Malgun Gothic", "Pretendard", "Apple SD Gothic Neo", sans-serif`;
-    const titleY = 52 * scale;
-    ctx.fillText(docTitle, canvasW / 2, titleY);
+    // 2. 문서 제목 (제목이 입력되어 있을 때만 작성되는 문서 상단 중앙에 크게 표기)
+    if (docTitle) {
+      ctx.fillStyle = '#0f172a';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = `bold ${Math.round(18.5 * scale)}px "Malgun Gothic", "Pretendard", "Apple SD Gothic Neo", sans-serif`;
+      const titleY = 52 * scale;
+      ctx.fillText(docTitle, canvasW / 2, titleY);
+    }
 
     // 3. 부서 또는 담당자명 (제목 우측 아래에 제목보다 작은 글씨로 표기)
     const deptY = 74 * scale;
@@ -502,8 +504,8 @@
   // ==========================================================================
   async function generateDefaultPdfTemplate() {
     return await generateAutoTablePdf(
-      state.autoFormTitle || '2026학년도 교직원 보안 및 청렴 서약서',
-      state.autoFormDept || '교무기획부 / 담당자: 교사 홍길동',
+      state.autoFormTitle || '',
+      state.autoFormDept || '',
       state.signers
     );
   }
@@ -1935,12 +1937,8 @@
   // ==========================================================================
   async function applyAutoFormTemplate(showAlert = false) {
     try {
-      const title = el.autoFormTitle && el.autoFormTitle.value.trim() 
-        ? el.autoFormTitle.value.trim() 
-        : (state.autoFormTitle || '2026학년도 교직원 보안 및 청렴 서약서');
-      const dept = el.autoFormDept && el.autoFormDept.value.trim()
-        ? el.autoFormDept.value.trim()
-        : (state.autoFormDept || '');
+      const title = el.autoFormTitle ? el.autoFormTitle.value.trim() : (state.autoFormTitle || '');
+      const dept = el.autoFormDept ? el.autoFormDept.value.trim() : (state.autoFormDept || '');
 
       state.autoFormTitle = title;
       state.autoFormDept = dept;
@@ -1951,7 +1949,7 @@
 
       const autoPdfBytes = await generateAutoTablePdf(title, dept, state.signers);
       if (autoPdfBytes) {
-        state.pdfTemplate.name = `${title}.pdf`;
+        state.pdfTemplate.name = `${title || '서명 양식'}.pdf`;
         state.pdfTemplate.bytes = autoPdfBytes;
         state.cachedUnifiedPdfBytes = null; // 통합 문서 캐시 무효화
 
@@ -1965,7 +1963,7 @@
         renderDocumentList();
 
         if (showAlert) {
-          showToast(`✨ "${title}" 2열 표 양식이 성공적으로 생성되어 적용되었습니다!`);
+          showToast(title ? `✨ "${title}" 2열 표 양식이 성공적으로 생성되어 적용되었습니다!` : '✨ 2열 표 양식이 성공적으로 생성되어 적용되었습니다!');
         }
       }
     } catch (err) {
@@ -1992,11 +1990,11 @@
     }
 
     if (!Array.isArray(state.documents) || state.documents.length === 0) {
-      // 기존 단일 문서 데이터를 바탕으로 첫 번째 기본 문서 자동 생성
+      // 기존 단일 문서 데이터를 바탕으로 첫 번째 기본 문서 자동 생성 (임의 제목 없음)
       const defaultDoc = {
         id: 'doc_' + Date.now(),
-        title: state.autoFormTitle || '2026학년도 교직원 보안 및 청렴 서약서',
-        dept: state.autoFormDept || '교무기획부 / 담당자: 교사 홍길동',
+        title: state.autoFormTitle || '',
+        dept: state.autoFormDept || '',
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         signers: [...state.signers],
@@ -2142,8 +2140,8 @@
 
     const newDocId = 'doc_' + Date.now();
     const now = new Date();
-    const defaultTitle = `${now.getFullYear()}학년도 신규 서약서 명부`;
-    const defaultDept = '교무행정부';
+    const defaultTitle = ''; // 제목을 임의로 만들지 않고 빈칸으로 설정
+    const defaultDept = '';  // 부서명도 빈칸으로 설정
 
     const newDoc = {
       id: newDocId,
@@ -2871,14 +2869,14 @@
       el.btnGenerateAutoForm.addEventListener('click', () => applyAutoFormTemplate(true));
     }
     if (el.autoFormTitle) {
-      el.autoFormTitle.value = state.autoFormTitle || '2026학년도 교직원 보안 및 청렴 서약서';
+      el.autoFormTitle.value = state.autoFormTitle || '';
       el.autoFormTitle.addEventListener('change', () => applyAutoFormTemplate(false));
       el.autoFormTitle.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') applyAutoFormTemplate(true);
       });
     }
     if (el.autoFormDept) {
-      el.autoFormDept.value = state.autoFormDept || '교무기획부 / 담당자: 교사 홍길동';
+      el.autoFormDept.value = state.autoFormDept || '';
       el.autoFormDept.addEventListener('change', () => applyAutoFormTemplate(false));
       el.autoFormDept.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') applyAutoFormTemplate(true);
@@ -3111,7 +3109,7 @@
         // 기본 표 양식 자동 생성 (2열 표 구조)
         const defaultBytes = await generateDefaultPdfTemplate();
         if (defaultBytes) {
-          state.pdfTemplate.name = `${state.autoFormTitle || '2026학년도 교직원 보안 및 청렴 서약서'}.pdf`;
+          state.pdfTemplate.name = `${state.autoFormTitle || '서명 양식'}.pdf`;
           state.pdfTemplate.bytes = defaultBytes;
           if (el.currentFormName) el.currentFormName.textContent = `${state.pdfTemplate.name} (2열 표 자동 생성본)`;
           await saveFileToDB('activeTemplate', defaultBytes, state.pdfTemplate.name);
