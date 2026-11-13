@@ -220,9 +220,22 @@
 
         <!-- 서명 날인 위치 및 옵션 설정 -->
         <div class="card">
-          <div class="card-title">📍 서명 위치 설정 (PDF 날인 좌표)</div>
-          <p class="card-desc">PDF 문서의 어느 위치에 서명 이미지가 날인될지 지정합니다. (기본 프리셋: 1페이지 하단 서명란)</p>
+          <div class="card-title">📍 서명 위치 설정 (양식 칸 맞춤)</div>
+          <p class="card-desc">PDF 문서의 어느 위치에 서명 이미지가 날인될지 지정합니다. 아래 미리보기에서 <strong>서명할 칸을 클릭</strong>하시면 해당 칸 안으로 서명 영역이 즉시 이동합니다.</p>
           
+          <!-- 빠른 프리셋 버튼 모음 -->
+          <div style="display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.75rem;">
+            <button type="button" id="btnPresetDefault" class="header-mini-btn" style="background: white; border: 1.5px solid var(--primary); color: var(--primary);">
+              🎯 기본 서명란 칸 맞춤 (135×52)
+            </button>
+            <button type="button" id="btnPresetTableSmall" class="header-mini-btn" style="background: white; border: 1.5px solid var(--gray-300); color: var(--gray-700);">
+              📋 표 양식 소형 칸 (75×24)
+            </button>
+            <button type="button" id="btnPresetTableMed" class="header-mini-btn" style="background: white; border: 1.5px solid var(--gray-300); color: var(--gray-700);">
+              📋 표 양식 중형 칸 (105×32)
+            </button>
+          </div>
+
           <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-top: 1rem;">
             <div>
               <label style="font-size: 0.85rem; font-weight: 700; color: var(--gray-700); display: block; margin-bottom: 0.35rem;">적용 페이지</label>
@@ -230,18 +243,29 @@
             </div>
             <div>
               <label style="font-size: 0.85rem; font-weight: 700; color: var(--gray-700); display: block; margin-bottom: 0.35rem;">X 좌표 (좌측 여백: pt)</label>
-              <input type="number" id="sigXInput" class="input-field" value="400">
+              <input type="number" id="sigXInput" class="input-field" value="390">
             </div>
             <div>
               <label style="font-size: 0.85rem; font-weight: 700; color: var(--gray-700); display: block; margin-bottom: 0.35rem;">Y 좌표 (하단 기준: pt)</label>
-              <input type="number" id="sigYInput" class="input-field" value="120">
+              <input type="number" id="sigYInput" class="input-field" value="125">
             </div>
             <div>
-              <label style="font-size: 0.85rem; font-weight: 700; color: var(--gray-700); display: block; margin-bottom: 0.35rem;">서명 크기 (가로 x 세로)</label>
+              <label style="font-size: 0.85rem; font-weight: 700; color: var(--gray-700); display: block; margin-bottom: 0.35rem;">서명 크기 (가로 × 세로)</label>
               <div style="display: flex; gap: 0.3rem;">
-                <input type="number" id="sigWidthInput" class="input-field" value="140" title="너비">
-                <input type="number" id="sigHeightInput" class="input-field" value="60" title="높이">
+                <input type="number" id="sigWidthInput" class="input-field" value="135" title="너비 (pt)">
+                <input type="number" id="sigHeightInput" class="input-field" value="52" title="높이 (pt)">
               </div>
+            </div>
+          </div>
+
+          <!-- 인터랙티브 문서 미리보기 (클릭으로 칸 지정) -->
+          <div style="margin-top: 1.25rem;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+              <span style="font-size: 0.85rem; font-weight: 700; color: var(--gray-700);">📄 서명 위치 미리보기 (클릭하여 칸 위치 변경)</span>
+              <span style="font-size: 0.78rem; color: var(--primary); font-weight: 600;">💡 원하는 칸을 마우스로 클릭하면 서명 박스가 즉시 이동합니다</span>
+            </div>
+            <div class="doc-viewer-frame" id="adminDocViewerFrame" style="height: 420px; cursor: crosshair;">
+              <div id="adminDocPagesContainer"></div>
             </div>
           </div>
 

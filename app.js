@@ -25,10 +25,10 @@
     },
     sigPosition: {
       page: window.APP_CONFIG?.defaultSignaturePosition?.page || 1,
-      x: window.APP_CONFIG?.defaultSignaturePosition?.x || 400,
-      y: window.APP_CONFIG?.defaultSignaturePosition?.y || 120,
-      width: window.APP_CONFIG?.defaultSignaturePosition?.width || 140,
-      height: window.APP_CONFIG?.defaultSignaturePosition?.height || 60
+      x: window.APP_CONFIG?.defaultSignaturePosition?.x || 390,
+      y: window.APP_CONFIG?.defaultSignaturePosition?.y || 125,
+      width: window.APP_CONFIG?.defaultSignaturePosition?.width || 135,
+      height: window.APP_CONFIG?.defaultSignaturePosition?.height || 52
     }
   };
 
@@ -483,6 +483,11 @@
     sigWidthInput: document.getElementById('sigWidthInput'),
     sigHeightInput: document.getElementById('sigHeightInput'),
     btnSaveStartConfig: document.getElementById('btnSaveStartConfig'),
+    btnPresetDefault: document.getElementById('btnPresetDefault'),
+    btnPresetTableSmall: document.getElementById('btnPresetTableSmall'),
+    btnPresetTableMed: document.getElementById('btnPresetTableMed'),
+    adminDocViewerFrame: document.getElementById('adminDocViewerFrame'),
+    adminDocPagesContainer: document.getElementById('adminDocPagesContainer'),
 
     // Admin: [진행] Tab
     statTotalSigners: document.getElementById('statTotalSigners'),
@@ -626,10 +631,61 @@
     if (el.canvasWatermark) el.canvasWatermark.style.opacity = '1';
   }
 
-  // 캔버스 내용을 투명 배경 PNG 데이터 URL로 추출
+  // 캔버스 여백을 투명하게 잘라내어 순수 서명 획만 추출 (양식 칸 안쪽에 딱 맞추기 위함)
+  function getTrimmedSignatureDataUrl(sourceCanvas) {
+    if (!sourceCanvas) return null;
+    const ctx = sourceCanvas.getContext('2d');
+    const w = sourceCanvas.width;
+    const h = sourceCanvas.height;
+    if (!w || !h) return sourceCanvas.toDataURL('image/png');
+
+    try {
+      const imgData = ctx.getImageData(0, 0, w, h);
+      const data = imgData.data;
+      let minX = w, minY = h, maxX = 0, maxY = 0;
+      let found = false;
+
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const alpha = data[(y * w + x) * 4 + 3];
+          if (alpha > 15) { // 획 픽셀 감지
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+            found = true;
+          }
+        }
+      }
+
+      if (!found) return sourceCanvas.toDataURL('image/png');
+
+      // 주변 안전 여백 (6px)
+      const pad = 6;
+      minX = Math.max(0, minX - pad);
+      minY = Math.max(0, minY - pad);
+      maxX = Math.min(w, maxX + pad);
+      maxY = Math.min(h, maxY + pad);
+
+      const cropW = Math.max(1, maxX - minX);
+      const cropH = Math.max(1, maxY - minY);
+
+      const trimmedCanvas = document.createElement('canvas');
+      trimmedCanvas.width = cropW;
+      trimmedCanvas.height = cropH;
+      const tCtx = trimmedCanvas.getContext('2d');
+      tCtx.drawImage(sourceCanvas, minX, minY, cropW, cropH, 0, 0, cropW, cropH);
+
+      return trimmedCanvas.toDataURL('image/png');
+    } catch (e) {
+      return sourceCanvas.toDataURL('image/png');
+    }
+  }
+
+  // 캔버스 내용을 투명 배경 PNG 데이터 URL로 추출 (여백 자동 정리)
   function getSignatureDataUrl() {
     if (!hasDrawn) return null;
-    return el.signatureCanvas.toDataURL('image/png');
+    return getTrimmedSignatureDataUrl(el.signatureCanvas);
   }
 
   // ==========================================================================
@@ -663,33 +719,45 @@
             const itemWidth = item.width || (cleanStr.length * 12);
             const itemHeight = item.height || 14;
 
-            // 이름 바로 우측(옆칸) 좌표 계산
-            let targetX = tx + itemWidth + 12;
-            let targetY = ty - 14;
-            let targetWidth = 105;
-            let targetHeight = 42;
+            // 표준 양식 표 칸 규격에 알맞은 서명 크기 (가로 75pt, 세로 24pt - 표 행 높이 26~30pt 안에 쏙 들어감)
+            let targetWidth = 75;
+            let targetHeight = 24;
+            let targetX = tx + itemWidth + 8;
+            let targetY = ty + 3 - (targetHeight / 2); // 텍스트 중앙선에 수직 정렬
 
-            // 바로 다음 텍스트가 (인), (서명), (인장) 등인 경우 그 위치를 서명란으로 매칭
+            // 1. 바로 다음 텍스트가 (인), (서명), (인장) 등인 경우 그 위치의 정중앙에 서명 날인
             if (i + 1 < items.length) {
               const nextItem = items[i + 1];
               const nextStr = (nextItem.str || '').replace(/\s+/g, '');
               const yDiff = Math.abs(nextItem.transform[5] - ty);
-              if (yDiff < 15 && (nextStr.includes('(인)') || nextStr.includes('(서명)') || nextStr.includes('인') || nextStr.includes('서명'))) {
-                targetX = nextItem.transform[4] - 8;
-                targetY = nextItem.transform[5] - 14;
+              if (yDiff < 14 && (nextStr.includes('(인)') || nextStr.includes('(서명)') || nextStr.includes('인') || nextStr.includes('서명'))) {
+                targetWidth = 65;
+                targetHeight = 24;
+                const nextCenterX = nextItem.transform[4] + ((nextItem.width || 18) / 2);
+                const nextCenterY = nextItem.transform[5] + 4;
+                targetX = nextCenterX - (targetWidth / 2);
+                targetY = nextCenterY - (targetHeight / 2);
               }
+            } 
+            // 2. 만약 해당 텍스트 자체에 "(인)"이나 "(서명)"이 붙어있는 경우 (예: "홍길동(인)")
+            else if (cleanStr.endsWith('(인)') || cleanStr.endsWith('(서명)')) {
+              targetWidth = 65;
+              targetHeight = 24;
+              targetX = (tx + itemWidth) - 30 - (targetWidth / 2);
+              targetY = ty + 3 - (targetHeight / 2);
             }
 
             // 페이지 경계 보정
             if (targetX + targetWidth > pageWidth - 10) {
               targetX = Math.max(10, pageWidth - targetWidth - 10);
             }
+            if (targetX < 10) targetX = 10;
             targetY = Math.max(10, Math.min(pageHeight - targetHeight - 10, targetY));
 
             bestMatch = {
               page: pageNum,
-              x: targetX,
-              y: targetY,
+              x: Math.round(targetX),
+              y: Math.round(targetY),
               width: targetWidth,
               height: targetHeight,
               found: true
@@ -710,11 +778,8 @@
     }
   }
 
-  async function renderPdfToContainer(pdfBytes, containerEl, customGuideCoord = null) {
-    if (!window.pdfjsLib || !pdfBytes) {
-      containerEl.innerHTML = '<div style="padding: 2rem; color: #64748b; text-align: center;">PDF 뷰어를 로드하는 중이거나 라이브러리를 연결할 수 없습니다.</div>';
-      return;
-    }
+  async function renderPdfToContainer(pdfBytes, containerEl, customGuideCoord = null, isInteractive = false) {
+    if (!window.pdfjsLib || !pdfBytes || !containerEl) return;
 
     containerEl.innerHTML = '<div style="padding: 1.5rem; color: #3b82f6; text-align: center;">문서를 불러오는 중입니다...</div>';
 
@@ -726,11 +791,11 @@
       // 서명 안내 가이드 박스 좌표 결정 (이름 옆칸 좌표 우선, 없을 시 관리자 기본 설정 좌표)
       const activeCoord = customGuideCoord || {
         page: Number(state.sigPosition.page || 1),
-        x: state.sigPosition.x,
-        y: state.sigPosition.y,
-        width: state.sigPosition.width,
-        height: state.sigPosition.height,
-        label: '✍️ 서명 날인 영역'
+        x: Number(state.sigPosition.x || 390),
+        y: Number(state.sigPosition.y || 125),
+        width: Number(state.sigPosition.width || 135),
+        height: Number(state.sigPosition.height || 52),
+        label: '✍️ 서명 날인 칸 (위치)'
       };
 
       for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
@@ -756,7 +821,9 @@
 
         canvasWrapper.appendChild(canvas);
 
-        // 해당 페이지에 서명 영역 가이드 박스 표시 (로그인한 이름 옆칸)
+        let createdGuideBox = null;
+
+        // 해당 페이지에 서명 영역 가이드 박스 표시
         if (pageNum === Number(activeCoord.page)) {
           const guideBox = document.createElement('div');
           guideBox.style.position = 'absolute';
@@ -771,7 +838,7 @@
           guideBox.style.width = `${boxW}px`;
           guideBox.style.height = `${boxH}px`;
           guideBox.style.border = '2px dashed #2563eb';
-          guideBox.style.backgroundColor = 'rgba(37, 99, 235, 0.12)';
+          guideBox.style.backgroundColor = 'rgba(37, 99, 235, 0.14)';
           guideBox.style.borderRadius = '4px';
           guideBox.style.pointerEvents = 'none';
           guideBox.style.display = 'flex';
@@ -780,12 +847,59 @@
           guideBox.style.fontSize = '11px';
           guideBox.style.color = '#1d4ed8';
           guideBox.style.fontWeight = 'bold';
-          guideBox.textContent = activeCoord.label || '✍️ 서명 날인 위치 (이름 옆칸)';
+          guideBox.style.zIndex = '10';
+          guideBox.textContent = activeCoord.label || '✍️ 서명 날인 위치 (칸 안)';
           canvasWrapper.appendChild(guideBox);
+          createdGuideBox = guideBox;
+        }
+
+        // 관리자 모드 인터랙티브 클릭으로 칸 위치 즉시 지정
+        if (isInteractive || containerEl === el.adminDocPagesContainer) {
+          canvasWrapper.style.cursor = 'crosshair';
+          canvasWrapper.title = '이 페이지의 원하는 칸을 클릭하시면 서명 위치가 해당 칸 안으로 이동합니다.';
+          canvasWrapper.addEventListener('click', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const clickX = e.clientX - rect.left;
+            const clickY = e.clientY - rect.top;
+
+            const scaleRatio = viewport.width / (unscaledViewport.width || 595.28);
+            const pdfX = clickX / scaleRatio;
+            const pdfY = (viewport.height - clickY) / scaleRatio;
+
+            const w = Number(state.sigPosition.width || 135);
+            const h = Number(state.sigPosition.height || 52);
+
+            state.sigPosition.page = pageNum;
+            state.sigPosition.x = Math.max(10, Math.round(pdfX - (w / 2)));
+            state.sigPosition.y = Math.max(10, Math.round(pdfY - (h / 2)));
+
+            syncConfigInputs();
+            saveLocalSettings();
+
+            renderPdfToContainer(state.pdfTemplate.bytes, el.adminDocPagesContainer, {
+              page: state.sigPosition.page,
+              x: state.sigPosition.x,
+              y: state.sigPosition.y,
+              width: state.sigPosition.width,
+              height: state.sigPosition.height,
+              label: '✍️ 지정된 서명 칸 위치'
+            }, true);
+
+            showToast(`📍 클릭한 칸으로 서명 위치가 지정되었습니다 (P.${state.sigPosition.page}, X: ${state.sigPosition.x}, Y: ${state.sigPosition.y})`);
+          });
         }
 
         containerEl.appendChild(canvasWrapper);
         await page.render(renderContext).promise;
+
+        // 사용자 뷰일 경우 해당 서명 칸으로 부드럽게 스크롤
+        if (containerEl === el.userDocPagesContainer && createdGuideBox) {
+          setTimeout(() => {
+            if (createdGuideBox && typeof createdGuideBox.scrollIntoView === 'function') {
+              createdGuideBox.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+          }, 200);
+        }
       }
     } catch (err) {
       console.error('PDF rendering failed:', err);
@@ -822,26 +936,40 @@
       targetPageNum = Math.min(Math.max(1, nameCoord.page), pages.length);
       posX = nameCoord.x;
       posY = nameCoord.y;
-      posW = nameCoord.width || 105;
-      posH = nameCoord.height || 42;
-      console.log(`[예원전자서명] "${signerName}" 선생님 이름 옆칸 위치에 자동 날인: ${targetPageNum}페이지 (X: ${posX}, Y: ${posY})`);
+      posW = nameCoord.width || 75;
+      posH = nameCoord.height || 24;
+      console.log(`[예원전자서명] "${signerName}" 선생님 이름 옆칸 위치에 자동 날인: ${targetPageNum}페이지 (X: ${posX}, Y: ${posY}, W: ${posW}, H: ${posH})`);
     } else {
       // 텍스트 미발견 시: 관리자 기본 설정 좌표 사용
       targetPageNum = Math.min(Math.max(1, Number(state.sigPosition.page || 1)), pages.length);
-      posX = Number(state.sigPosition.x || 400);
-      posY = Number(state.sigPosition.y || 120);
-      posW = Number(state.sigPosition.width || 140);
-      posH = Number(state.sigPosition.height || 60);
+      posX = Number(state.sigPosition.x || 390);
+      posY = Number(state.sigPosition.y || 125);
+      posW = Number(state.sigPosition.width || 135);
+      posH = Number(state.sigPosition.height || 52);
     }
 
     const targetPage = pages[targetPageNum - 1];
 
-    // 로그인한 선생님 이름 바로 옆칸에 서명 이미지 날인
+    // 서명 이미지가 칸을 벗어나지 않도록 종횡비 유지(fit: contain) 및 안전 내부 여백 적용
+    const imgWidth = signatureImage.width;
+    const imgHeight = signatureImage.height;
+    const safePad = 3; // 칸 테두리와 서명 사이의 3pt 안전 여백
+    const maxW = Math.max(10, posW - (safePad * 2));
+    const maxH = Math.max(10, posH - (safePad * 2));
+
+    const scale = Math.min(maxW / imgWidth, maxH / imgHeight, 1);
+    const finalW = imgWidth * scale;
+    const finalH = imgHeight * scale;
+
+    // 양식 칸 내부의 정중앙에 정렬하여 날인
+    const finalX = posX + (posW - finalW) / 2;
+    const finalY = posY + (posH - finalH) / 2;
+
     targetPage.drawImage(signatureImage, {
-      x: posX,
-      y: posY,
-      width: posW,
-      height: posH
+      x: finalX,
+      y: finalY,
+      width: finalW,
+      height: finalH
     });
 
     const signedBytes = await pdfDoc.save();
@@ -973,6 +1101,7 @@
       renderProgressTable();
       renderCompleteTable();
       updateDashboardStats();
+      refreshAdminAndUserPreview();
 
       showToast(`🎉 ${teacherName} 선생님의 서명이 성공적으로 제출되었습니다!`);
     } catch (err) {
@@ -1103,6 +1232,7 @@
     renderCompleteTable();
     updateDashboardStats();
     syncConfigInputs();
+    refreshAdminAndUserPreview();
   }
 
   function switchToUserView() {
@@ -1180,7 +1310,9 @@
       targetContent.classList.add('active');
     }
 
-    if (targetTabId === 'tab-progress') {
+    if (targetTabId === 'tab-start') {
+      refreshAdminAndUserPreview();
+    } else if (targetTabId === 'tab-progress') {
       renderProgressTable();
       updateDashboardStats();
     } else if (targetTabId === 'tab-complete') {
@@ -1292,10 +1424,8 @@
       // IndexedDB에 저장
       await saveFileToDB('activeTemplate', bytes, file.name);
 
-      // 사용자 뷰 미리보기 즉시 갱신
-      if (el.userDocPagesContainer) {
-        renderPdfToContainer(bytes, el.userDocPagesContainer);
-      }
+      // 관리자 뷰 및 사용자 뷰 미리보기 즉시 갱신
+      refreshAdminAndUserPreview();
 
       // PDF 텍스트에서 서명 대상자 성명 자동 감지
       showToast('📄 PDF를 등록하고 문서 내 대상자 이름을 분석하는 중입니다...', 2500);
@@ -1377,9 +1507,7 @@
     el.currentFormName.textContent = state.pdfTemplate.name;
     await saveFileToDB('activeTemplate', defaultBytes, state.pdfTemplate.name);
     showToast('기본 서약서 양식으로 복원되었습니다.');
-    if (el.userDocPagesContainer) {
-      renderPdfToContainer(defaultBytes, el.userDocPagesContainer);
-    }
+    refreshAdminAndUserPreview();
   }
 
   // 등록된 선생님 대상자 태그 렌더링
@@ -1460,29 +1588,46 @@
     }
   }
 
+  // 관리자 양식 미리보기 및 사용자 미리보기 일괄 갱신
+  function refreshAdminAndUserPreview() {
+    if (state.pdfTemplate.bytes) {
+      if (el.adminDocPagesContainer) {
+        renderPdfToContainer(state.pdfTemplate.bytes, el.adminDocPagesContainer, {
+          page: Number(state.sigPosition.page || 1),
+          x: Number(state.sigPosition.x || 390),
+          y: Number(state.sigPosition.y || 125),
+          width: Number(state.sigPosition.width || 135),
+          height: Number(state.sigPosition.height || 52),
+          label: '✍️ 서명 날인 위치 (클릭하여 칸 이동 가능)'
+        }, true);
+      }
+      if (el.userDocPagesContainer && !state.currentSignerName) {
+        renderPdfToContainer(state.pdfTemplate.bytes, el.userDocPagesContainer);
+      }
+    }
+  }
+
   // 서명 위치 및 설정값 저장
   function handleSaveStartConfig() {
     state.sigPosition.page = parseInt(el.sigPageInput.value, 10) || 1;
-    state.sigPosition.x = parseInt(el.sigXInput.value, 10) || 400;
-    state.sigPosition.y = parseInt(el.sigYInput.value, 10) || 120;
-    state.sigPosition.width = parseInt(el.sigWidthInput.value, 10) || 140;
-    state.sigPosition.height = parseInt(el.sigHeightInput.value, 10) || 60;
+    state.sigPosition.x = parseInt(el.sigXInput.value, 10) || 390;
+    state.sigPosition.y = parseInt(el.sigYInput.value, 10) || 125;
+    state.sigPosition.width = parseInt(el.sigWidthInput.value, 10) || 135;
+    state.sigPosition.height = parseInt(el.sigHeightInput.value, 10) || 52;
 
     saveLocalSettings();
     showToast('💾 서명 위치 및 환경 설정이 저장되었습니다.');
 
     // 미리보기 갱신
-    if (state.pdfTemplate.bytes && el.userDocPagesContainer) {
-      renderPdfToContainer(state.pdfTemplate.bytes, el.userDocPagesContainer);
-    }
+    refreshAdminAndUserPreview();
   }
 
   function syncConfigInputs() {
-    el.sigPageInput.value = state.sigPosition.page;
-    el.sigXInput.value = state.sigPosition.x;
-    el.sigYInput.value = state.sigPosition.y;
-    el.sigWidthInput.value = state.sigPosition.width;
-    el.sigHeightInput.value = state.sigPosition.height;
+    if (el.sigPageInput) el.sigPageInput.value = state.sigPosition.page || 1;
+    if (el.sigXInput) el.sigXInput.value = state.sigPosition.x || 390;
+    if (el.sigYInput) el.sigYInput.value = state.sigPosition.y || 125;
+    if (el.sigWidthInput) el.sigWidthInput.value = state.sigPosition.width || 135;
+    if (el.sigHeightInput) el.sigHeightInput.value = state.sigPosition.height || 52;
   }
 
   // ==========================================================================
@@ -1846,6 +1991,57 @@
     if (el.btnClearAllSigners) el.btnClearAllSigners.addEventListener('click', handleClearAllSigners);
     if (el.btnSaveStartConfig) el.btnSaveStartConfig.addEventListener('click', handleSaveStartConfig);
 
+    // 서명 위치 빠른 프리셋 버튼 (칸 맞춤)
+    if (el.btnPresetDefault) {
+      el.btnPresetDefault.addEventListener('click', () => {
+        state.sigPosition.x = 390;
+        state.sigPosition.y = 125;
+        state.sigPosition.width = 135;
+        state.sigPosition.height = 52;
+        syncConfigInputs();
+        saveLocalSettings();
+        refreshAdminAndUserPreview();
+        showToast('🎯 기본 서명란 칸 맞춤(135×52)이 적용되었습니다.');
+      });
+    }
+
+    if (el.btnPresetTableSmall) {
+      el.btnPresetTableSmall.addEventListener('click', () => {
+        state.sigPosition.width = 75;
+        state.sigPosition.height = 24;
+        syncConfigInputs();
+        saveLocalSettings();
+        refreshAdminAndUserPreview();
+        showToast('📋 표 양식 소형 칸 맞춤(75×24)이 적용되었습니다.');
+      });
+    }
+
+    if (el.btnPresetTableMed) {
+      el.btnPresetTableMed.addEventListener('click', () => {
+        state.sigPosition.width = 105;
+        state.sigPosition.height = 32;
+        syncConfigInputs();
+        saveLocalSettings();
+        refreshAdminAndUserPreview();
+        showToast('📋 표 양식 중형 칸 맞춤(105×32)이 적용되었습니다.');
+      });
+    }
+
+    // 좌표/크기 수동 입력 시 실시간 미리보기 갱신
+    ['sigPageInput', 'sigXInput', 'sigYInput', 'sigWidthInput', 'sigHeightInput'].forEach(id => {
+      const input = document.getElementById(id);
+      if (input) {
+        input.addEventListener('input', () => {
+          state.sigPosition.page = parseInt(el.sigPageInput.value, 10) || 1;
+          state.sigPosition.x = parseInt(el.sigXInput.value, 10) || 390;
+          state.sigPosition.y = parseInt(el.sigYInput.value, 10) || 125;
+          state.sigPosition.width = parseInt(el.sigWidthInput.value, 10) || 135;
+          state.sigPosition.height = parseInt(el.sigHeightInput.value, 10) || 52;
+          refreshAdminAndUserPreview();
+        });
+      }
+    });
+
     // 관리자: [진행] 메뉴
     if (el.btnCopyUserSignLink) el.btnCopyUserSignLink.addEventListener('click', () => copySignerLink());
     if (el.btnRefreshProgress) {
@@ -1949,6 +2145,7 @@
       renderProgressTable();
       renderCompleteTable();
       updateDashboardStats();
+      refreshAdminAndUserPreview();
     } catch (dbErr) {
       console.warn('Bootstrap background storage load skipped:', dbErr);
     }
