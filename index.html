@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>예원 전자서명 시스템</title>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=20261113_1505">
   
   <!-- PDF.js & pdf-lib CDN for browser-based PDF processing -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -80,32 +80,19 @@
         </div>
       </div>
 
-      <!-- 2단계: 선생님 환영 & 서명란 제시 -->
+      <!-- 2단계: 선생님 환영 & 서명란 제시 (요구사항: “000 선생님 반갑습니다” 표기 및 서명란 제시) -->
       <div class="signing-view" id="userSigningStep">
         
         <!-- 환영 카드 (요구사항: “000 선생님 반갑습니다” 표기) -->
         <div class="teacher-greeting-card">
           <div class="greeting-text-box">
             <h3 id="teacherGreetingTitle">홍길동 선생님 반갑습니다</h3>
-            <p>아래 서명 양식을 확인하신 후 정자 또는 필기체로 서명해 주세요.</p>
+            <p>아래 서명란에 정자 또는 필기체로 서명해 주세요.</p>
           </div>
           <button type="button" class="change-name-btn" id="btnReenterName">이름 다시 입력</button>
         </div>
 
-        <!-- 서명 대상 문서 미리보기 -->
-        <div class="doc-preview-card">
-          <div class="card-title">
-            <span>📄 서명 대상 문서 확인</span>
-            <span id="docFileNameBadge" class="brand-badge">표준 서약서 양식</span>
-          </div>
-          <p class="card-desc">문서 내용을 아래로 스크롤하여 확인하실 수 있습니다.</p>
-          <div class="doc-viewer-frame" id="userDocViewerFrame">
-            <!-- PDF 페이지 캔버스들이 렌더링됩니다 -->
-            <div id="userDocPagesContainer"></div>
-          </div>
-        </div>
-
-        <!-- 서명란 (Canvas 패드) -->
+        <!-- 서명란 (Canvas 패드) - 미리보기와 내려받기는 관리자 메뉴로만 분리 -->
         <div class="signature-card">
           <div class="signature-card-header">
             <h4>✍️ 서명란</h4>
@@ -117,7 +104,7 @@
             <canvas id="signatureCanvas"></canvas>
           </div>
 
-          <!-- 서명란 아래 요구사항 버튼: [다시 하기], [제출] -->
+          <!-- 서명란 아래 요구사항 버튼 2개: [다시 하기], [제출] -->
           <div class="signature-actions">
             <button type="button" id="btnResetSign" class="btn-secondary">
               🔄 다시 하기
@@ -130,18 +117,15 @@
 
       </div>
 
-      <!-- 3단계: 제출 완료 화면 -->
+      <!-- 3단계: 제출 완료 화면 (내려받기는 관리자 메뉴에만 제공) -->
       <div class="card user-box" id="userCompleteStep" style="display: none;">
         <div class="welcome-icon-box" style="background: var(--success-light); color: var(--success);">🎉</div>
         <h2>서명이 정상적으로 제출되었습니다</h2>
-        <p><strong id="completedTeacherName">홍길동</strong> 선생님의 전자서명이 안전하게 저장 및 날인되었습니다.</p>
+        <p><strong id="completedTeacherName">홍길동</strong> 선생님의 서명이 제출되었습니다. 감사합니다.</p>
         
         <div style="display: flex; gap: 0.75rem; justify-content: center; margin-top: 1.5rem;">
-          <button type="button" id="btnDownloadMySignedPdf" class="btn-primary" style="background: var(--success);">
-            📥 서명된 PDF 확인 및 다운로드
-          </button>
-          <button type="button" id="btnRestartUserFlow" class="btn-secondary">
-            첫 화면으로
+          <button type="button" id="btnRestartUserFlow" class="btn-primary">
+            확인 (첫 화면으로)
           </button>
         </div>
       </div>
@@ -162,7 +146,7 @@
           📊 [진행] 실시간 서명 현황
         </button>
         <button type="button" class="tab-btn" data-tab="tab-complete">
-          📁 [완료] PDF 문서 다운로드
+          📁 [완료] PDF 출력 & 다운로드
         </button>
       </nav>
 
@@ -531,7 +515,7 @@
   <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
 
   <!-- 애플리케이션 스크립트 -->
-  <script src="config.js"></script>
-  <script src="app.js"></script>
+  <script src="config.js?v=20261113_1505"></script>
+  <script src="app.js?v=20261113_1505"></script>
 </body>
 </html>

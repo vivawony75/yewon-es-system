@@ -844,14 +844,18 @@
   async function renderPdfToContainer(pdfBytes, containerEl, customGuideCoord = null, isInteractive = false) {
     if (!window.pdfjsLib || !pdfBytes || !containerEl) return;
 
+    // 객체나 버퍼 형태로 전달되었을 경우를 대비한 안전 변환
+    const rawData = (pdfBytes && pdfBytes.bytes && pdfBytes.bytes instanceof Uint8Array) ? pdfBytes.bytes : pdfBytes;
+    const dataArray = (rawData instanceof Uint8Array) ? rawData.slice() : new Uint8Array(rawData);
+
     containerEl.innerHTML = '<div style="padding: 1.5rem; color: #3b82f6; text-align: center;">문서를 불러오는 중입니다...</div>';
 
     try {
-      const loadingTask = pdfjsLib.getDocument({ data: pdfBytes.slice() });
+      const loadingTask = pdfjsLib.getDocument({ data: dataArray });
       const pdf = await loadingTask.promise;
       containerEl.innerHTML = '';
 
-      // 서명 안내 가이드 박스 좌표 결정 (이름 옆칸 좌표 우선, 없을 시 관리자 기본 설정 좌표)
+      // 서명 안내 가이드 박스 좌표 결정
       const activeCoord = customGuideCoord || {
         page: Number(state.sigPosition.page || 1),
         x: Number(state.sigPosition.x || 390),
@@ -886,8 +890,11 @@
 
         let createdGuideBox = null;
 
-        // 해당 페이지에 서명 영역 가이드 박스 표시
-        if (pageNum === Number(activeCoord.page)) {
+        // 서명 가이드 박스는 안내 좌표가 명시된 경우 또는 관리자 양식 위치 설정 화면에서만 표시 (통합본이나 단순 미리보기에서는 표시 안 함)
+        const shouldShowGuide = (customGuideCoord && customGuideCoord.found && pageNum === Number(activeCoord.page)) ||
+                                (containerEl === el.adminDocPagesContainer && pageNum === Number(activeCoord.page));
+
+        if (shouldShowGuide) {
           const guideBox = document.createElement('div');
           guideBox.style.position = 'absolute';
           const scaleRatio = viewport.width / (unscaledViewport.width || 595.28);
@@ -1115,11 +1122,7 @@
     }
 
     const unifiedPdfBytes = await pdfDoc.save();
-    return {
-      bytes: unifiedPdfBytes,
-      signedCount: signedCount,
-      totalCount: state.signers.length
-    };
+    return unifiedPdfBytes;
   }
 
   // PDF 즉시 인쇄(출력) 헬퍼
@@ -1209,29 +1212,21 @@
     el.signerNameInput.focus();
   }
 
-  // 2단계: 서명 화면으로 전환
+  // 2단계: 서명 화면으로 전환 (요구사항: “000 선생님 반갑습니다” 표기하고 서명란 제시)
   async function proceedToSigningStep(teacherName) {
     el.userNameStep.style.display = 'none';
     el.userSigningStep.style.display = 'block';
     el.userCompleteStep.style.display = 'none';
 
     // 요구사항: “000 선생님 반갑습니다” 표기
-    el.teacherGreetingTitle.textContent = `${teacherName} 선생님 반갑습니다`;
-    el.docFileNameBadge.textContent = state.pdfTemplate.name || '표준 양식 문서';
-
-    // 서명할 양식 문서 미리보기 렌더링 (로그인한 선생님 이름 옆칸 위치에 가이드 박스 표시)
-    if (state.pdfTemplate.bytes) {
-      const nameCoord = await findSignerNameCoordinates(state.pdfTemplate.bytes, teacherName);
-      if (nameCoord && nameCoord.found) {
-        nameCoord.label = `✍️ ${teacherName} 선생님 서명 위치`;
-      }
-      renderPdfToContainer(state.pdfTemplate.bytes, el.userDocPagesContainer, nameCoord);
+    if (el.teacherGreetingTitle) {
+      el.teacherGreetingTitle.textContent = `${teacherName} 선생님 반갑습니다`;
     }
 
     // 캔버스 초기화
     setTimeout(() => {
       initSignatureCanvas();
-    }, 100);
+    }, 50);
   }
 
   // 성명 다시 입력하기 버튼
