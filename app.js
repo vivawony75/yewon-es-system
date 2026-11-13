@@ -17,6 +17,8 @@
   const state = {
     isAdminLoggedIn: false,
     currentSignerName: null,
+    currentOutputMode: 'allInOne', // 'allInOne' (한 장에 모든 서명 기재) or 'individual' (개인별)
+    cachedUnifiedPdfBytes: null,
     signers: [...(window.APP_CONFIG?.defaultSigners || ['홍길동', '김영희', '이철수', '박민수', '정수진'])],
     signatures: {}, // name -> { name, signedAt, signatureImage, pdfBlob }
     pdfTemplate: {
@@ -499,6 +501,19 @@
     progressTableBody: document.getElementById('progressTableBody'),
 
     // Admin: [완료] Tab
+    radioModeAllInOne: document.getElementById('radioModeAllInOne'),
+    radioModeIndividual: document.getElementById('radioModeIndividual'),
+    modeCardAllInOne: document.getElementById('modeCardAllInOne'),
+    modeCardIndividual: document.getElementById('modeCardIndividual'),
+    completeSectionAllInOne: document.getElementById('completeSectionAllInOne'),
+    completeSectionIndividual: document.getElementById('completeSectionIndividual'),
+    unifiedSignCountBadge: document.getElementById('unifiedSignCountBadge'),
+    btnPrintUnifiedPdf: document.getElementById('btnPrintUnifiedPdf'),
+    btnDownloadUnifiedPdf: document.getElementById('btnDownloadUnifiedPdf'),
+    btnPreviewUnifiedPdf: document.getElementById('btnPreviewUnifiedPdf'),
+    unifiedDocViewerFrame: document.getElementById('unifiedDocViewerFrame'),
+    unifiedDocPagesContainer: document.getElementById('unifiedDocPagesContainer'),
+    btnPrintAllIndividual: document.getElementById('btnPrintAllIndividual'),
     btnDownloadAllPdfZip: document.getElementById('btnDownloadAllPdfZip'),
     completeTableBody: document.getElementById('completeTableBody'),
 
@@ -692,7 +707,7 @@
   // [6] PDF 렌더링 헬퍼 & 성명 옆칸 자동 좌표 탐색 (PDF.js 활용)
   // ==========================================================================
   
-  // PDF 문서 내에서 로그인한 선생님 성명 위치 및 바로 옆칸 좌표 탐색
+  // PDF 문서 내에서 로그인한 선생님 성명 위치 및 바로 옆칸 좌표 정밀 탐색 (칸 중앙 정렬)
   async function findSignerNameCoordinates(pdfBytes, signerName) {
     if (!window.pdfjsLib || !pdfBytes || !signerName) return null;
     try {
@@ -709,6 +724,22 @@
         const pageWidth = viewport.width;
         const pageHeight = viewport.height;
 
+        // 1. 해당 페이지 내에서 '서명', '날인', '확인', '(인)' 관련 열 헤더(Column Header) 탐색
+        let detectedSignHeader = null;
+        for (let j = 0; j < items.length; j++) {
+          const s = (items[j].str || '').replace(/\s+/g, '');
+          if (s === '서명' || s === '서명란' || s === '(서명)' || s === '날인' || s === '(인)' || s === '서명(인)' || s === '확인' || s.includes('서약자서명')) {
+            detectedSignHeader = {
+              x: items[j].transform[4],
+              y: items[j].transform[5],
+              width: items[j].width || 30,
+              centerX: items[j].transform[4] + ((items[j].width || 30) / 2)
+            };
+            break;
+          }
+        }
+
+        // 2. 성명 매칭 및 옆 칸 정중앙 좌표 계산
         for (let i = 0; i < items.length; i++) {
           const item = items[i];
           const cleanStr = (item.str || '').replace(/\s+/g, '');
@@ -719,33 +750,63 @@
             const itemWidth = item.width || (cleanStr.length * 12);
             const itemHeight = item.height || 14;
 
-            // 표준 양식 표 칸 규격에 알맞은 서명 크기 (가로 75pt, 세로 24pt - 표 행 높이 26~30pt 안에 쏙 들어감)
+            // 표준 양식 표 칸 규격에 알맞은 서명 크기 (가로 75pt, 세로 24pt)
             let targetWidth = 75;
             let targetHeight = 24;
-            let targetX = tx + itemWidth + 8;
-            let targetY = ty + 3 - (targetHeight / 2); // 텍스트 중앙선에 수직 정렬
 
-            // 1. 바로 다음 텍스트가 (인), (서명), (인장) 등인 경우 그 위치의 정중앙에 서명 날인
-            if (i + 1 < items.length) {
-              const nextItem = items[i + 1];
-              const nextStr = (nextItem.str || '').replace(/\s+/g, '');
-              const yDiff = Math.abs(nextItem.transform[5] - ty);
-              if (yDiff < 14 && (nextStr.includes('(인)') || nextStr.includes('(서명)') || nextStr.includes('인') || nextStr.includes('서명'))) {
-                targetWidth = 65;
-                targetHeight = 24;
-                const nextCenterX = nextItem.transform[4] + ((nextItem.width || 18) / 2);
-                const nextCenterY = nextItem.transform[5] + 4;
-                targetX = nextCenterX - (targetWidth / 2);
-                targetY = nextCenterY - (targetHeight / 2);
-              }
-            } 
-            // 2. 만약 해당 텍스트 자체에 "(인)"이나 "(서명)"이 붙어있는 경우 (예: "홍길동(인)")
-            else if (cleanStr.endsWith('(인)') || cleanStr.endsWith('(서명)')) {
+            // 행(Row)의 수직 정중앙 Y 좌표 (한글 폰트 베이스라인 ty 기준, 광학적 중심은 ty + itemHeight*0.35)
+            const rowCenterY = ty + (itemHeight * 0.35);
+
+            // 동일 행(Y 좌표 차이 10pt 이내)에 있는 우측 텍스트 아이템들 수집
+            const sameRowRightItems = items.filter((it, idx) => {
+              if (idx === i) return false;
+              const yDiff = Math.abs(it.transform[5] - ty);
+              return yDiff <= 10 && it.transform[4] > (tx + itemWidth - 2);
+            }).sort((a, b) => a.transform[4] - b.transform[4]);
+
+            let cellCenterX = null;
+
+            // Case A: 동일 행 바로 우측에 (인), (서명), 인, 서명 문구가 명시되어 있는 경우
+            const signMarkerItem = sameRowRightItems.find(it => {
+              const s = (it.str || '').replace(/\s+/g, '');
+              return s.includes('(인)') || s.includes('(서명)') || s.includes('인') || s.includes('서명') || s.includes('도장');
+            });
+
+            if (signMarkerItem) {
+              // (인) 또는 (서명) 문구의 정중앙에 정렬
+              cellCenterX = signMarkerItem.transform[4] + ((signMarkerItem.width || 18) / 2);
               targetWidth = 65;
-              targetHeight = 24;
-              targetX = (tx + itemWidth) - 30 - (targetWidth / 2);
-              targetY = ty + 3 - (targetHeight / 2);
+            } 
+            // Case B: 해당 텍스트 자체에 "(인)"이나 "(서명)"이 붙어있는 경우 (예: "홍길동(인)")
+            else if (cleanStr.endsWith('(인)') || cleanStr.endsWith('(서명)')) {
+              cellCenterX = (tx + itemWidth) - 15;
+              targetWidth = 65;
             }
+            // Case C: 동일 행 우측에 다른 열의 내용(예: "비고" 셀 등)이 있는 경우 -> 두 열 사이의 빈 칸 정중앙 계산
+            else if (sameRowRightItems.length > 0) {
+              const nextColItem = sameRowRightItems[0];
+              const cellLeft = tx + itemWidth;
+              const cellRight = nextColItem.transform[4];
+              const gap = cellRight - cellLeft;
+              if (gap > 20) {
+                cellCenterX = cellLeft + (gap / 2);
+                targetWidth = Math.min(80, Math.max(55, gap - 8));
+              }
+            }
+
+            // Case D: 표 상단에 '서명' 열 헤더가 존재하고, 이름보다 우측에 위치한 경우 -> 서명 열 헤더의 X 중심과 일치
+            if (cellCenterX === null && detectedSignHeader && detectedSignHeader.y > ty && detectedSignHeader.x >= tx) {
+              cellCenterX = detectedSignHeader.centerX;
+            }
+
+            // Case E: 일반적인 테이블이나 서식에서 이름 우측 빈 칸 중심 추정 (기본 칸의 중심)
+            if (cellCenterX === null) {
+              cellCenterX = tx + itemWidth + 12 + (targetWidth / 2);
+            }
+
+            // 계산된 칸 중심을 기준으로 서명 박스 좌표 결정
+            let targetX = cellCenterX - (targetWidth / 2);
+            let targetY = rowCenterY - (targetHeight / 2);
 
             // 페이지 경계 보정
             if (targetX + targetWidth > pageWidth - 10) {
@@ -760,11 +821,13 @@
               y: Math.round(targetY),
               width: targetWidth,
               height: targetHeight,
+              cellCenterX: Math.round(cellCenterX),
+              rowCenterY: Math.round(rowCenterY),
               found: true
             };
 
             // (인) 표기가 포함된 경우 가장 확실한 서명 위치이므로 즉시 반환
-            if (cleanStr.includes('(인)') || cleanStr.includes('서명') || (i + 1 < items.length && items[i + 1].str.includes('인'))) {
+            if (signMarkerItem || cleanStr.includes('(인)') || cleanStr.includes('서명')) {
               return bestMatch;
             }
           }
@@ -977,6 +1040,129 @@
   }
 
   // ==========================================================================
+  // [7-1] 모든 사용자 서명을 한 장(통합 문서)에 기재하여 생성 (통합 서명본)
+  // ==========================================================================
+  async function generateUnifiedPdf() {
+    if (!window.PDFLib) {
+      throw new Error('PDFLib 라이브러리를 사용할 수 없습니다.');
+    }
+    const { PDFDocument } = window.PDFLib;
+
+    let templateBytes = state.pdfTemplate.bytes;
+    if (!templateBytes) {
+      templateBytes = await generateDefaultPdfTemplate();
+    }
+
+    const pdfDoc = await PDFDocument.load(templateBytes.slice());
+    const pages = pdfDoc.getPages();
+
+    let signedCount = 0;
+
+    // 등록된 모든 대상자 중 서명이 제출된 사용자의 서명을 순회하여 날인
+    for (const signerName of state.signers) {
+      const record = state.signatures[signerName];
+      if (record && record.signatureImage) {
+        try {
+          const signatureImage = await pdfDoc.embedPng(record.signatureImage);
+          const nameCoord = await findSignerNameCoordinates(templateBytes, signerName);
+
+          let targetPageNum;
+          let posX, posY, posW, posH;
+
+          if (nameCoord && nameCoord.found) {
+            targetPageNum = Math.min(Math.max(1, nameCoord.page), pages.length);
+            posX = nameCoord.x;
+            posY = nameCoord.y;
+            posW = nameCoord.width || 75;
+            posH = nameCoord.height || 24;
+          } else {
+            targetPageNum = Math.min(Math.max(1, Number(state.sigPosition.page || 1)), pages.length);
+            posX = Number(state.sigPosition.x || 390);
+            posY = Number(state.sigPosition.y || 125);
+            posW = Number(state.sigPosition.width || 135);
+            posH = Number(state.sigPosition.height || 52);
+          }
+
+          const targetPage = pages[targetPageNum - 1];
+
+          // 서명 이미지가 칸을 벗어나지 않도록 종횡비 유지(fit: contain) 및 안전 내부 여백 적용
+          const imgWidth = signatureImage.width;
+          const imgHeight = signatureImage.height;
+          const safePad = 2; // 칸 테두리와 서명 사이의 2pt 안전 여백
+          const maxW = Math.max(10, posW - (safePad * 2));
+          const maxH = Math.max(10, posH - (safePad * 2));
+
+          const scale = Math.min(maxW / imgWidth, maxH / imgHeight, 1);
+          const finalW = imgWidth * scale;
+          const finalH = imgHeight * scale;
+
+          // 양식 칸 내부의 정확한 정중앙에 배치
+          const finalX = posX + (posW - finalW) / 2;
+          const finalY = posY + (posH - finalH) / 2;
+
+          targetPage.drawImage(signatureImage, {
+            x: finalX,
+            y: finalY,
+            width: finalW,
+            height: finalH
+          });
+
+          signedCount++;
+        } catch (err) {
+          console.warn(`[예원전자서명] "${signerName}" 통합 서명 날인 실패:`, err);
+        }
+      }
+    }
+
+    const unifiedPdfBytes = await pdfDoc.save();
+    return {
+      bytes: unifiedPdfBytes,
+      signedCount: signedCount,
+      totalCount: state.signers.length
+    };
+  }
+
+  // PDF 즉시 인쇄(출력) 헬퍼
+  function printPdfBytes(pdfBytes, title = '예원전자서명문서') {
+    if (!pdfBytes) {
+      showToast('⚠️ 출력할 문서 데이터가 없습니다.');
+      return;
+    }
+    try {
+      const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+      const blobUrl = URL.createObjectURL(blob);
+
+      let printIframe = document.getElementById('appPrintIframe');
+      if (!printIframe) {
+        printIframe = document.createElement('iframe');
+        printIframe.id = 'appPrintIframe';
+        printIframe.style.position = 'fixed';
+        printIframe.style.right = '0';
+        printIframe.style.bottom = '0';
+        printIframe.style.width = '0';
+        printIframe.style.height = '0';
+        printIframe.style.border = '0';
+        document.body.appendChild(printIframe);
+      }
+
+      printIframe.src = blobUrl;
+      printIframe.onload = function() {
+        setTimeout(() => {
+          try {
+            printIframe.contentWindow.focus();
+            printIframe.contentWindow.print();
+          } catch (e) {
+            window.open(blobUrl, '_blank');
+          }
+        }, 300);
+      };
+    } catch (err) {
+      console.error('Print error:', err);
+      showToast('❌ 인쇄 창을 여는 중 오류가 발생했습니다.');
+    }
+  }
+
+  // ==========================================================================
   // [8] 사용자 화면 로직 (User View Controller)
   // ==========================================================================
   
@@ -1090,6 +1276,7 @@
       };
 
       state.signatures[teacherName] = record;
+      state.cachedUnifiedPdfBytes = null; // 통합 문서 캐시 무효화
       await saveSignatureToDB(record);
 
       // 사용자 완료 화면 전환
@@ -1100,6 +1287,7 @@
       // 관리자 실시간 테이블 자동 갱신
       renderProgressTable();
       renderCompleteTable();
+      updateCompleteTabUI();
       updateDashboardStats();
       refreshAdminAndUserPreview();
 
@@ -1230,6 +1418,7 @@
     renderSignerTags();
     renderProgressTable();
     renderCompleteTable();
+    updateCompleteTabUI();
     updateDashboardStats();
     syncConfigInputs();
     refreshAdminAndUserPreview();
@@ -1316,7 +1505,7 @@
       renderProgressTable();
       updateDashboardStats();
     } else if (targetTabId === 'tab-complete') {
-      renderCompleteTable();
+      updateCompleteTabUI();
     }
   }
 
@@ -1742,9 +1931,95 @@
   }
 
   // ==========================================================================
-  // [12] 관리자 [완료] 메뉴 로직 (PDF 다운로드 및 ZIP 일괄 압축)
+  // [12] 관리자 [완료] 메뉴 로직 (출력 방식 선택: 1. 한 장 통합 출력 / 2. 개인별 출력)
   // ==========================================================================
+
+  // 출력 모드 변경 ('allInOne' or 'individual')
+  function setOutputMode(mode) {
+    state.currentOutputMode = mode;
+    updateCompleteTabUI();
+  }
+
+  // [완료] 탭 전체 UI 업데이트
+  async function updateCompleteTabUI() {
+    const isAllInOne = (state.currentOutputMode === 'allInOne');
+
+    if (el.radioModeAllInOne) el.radioModeAllInOne.checked = isAllInOne;
+    if (el.radioModeIndividual) el.radioModeIndividual.checked = !isAllInOne;
+
+    if (el.modeCardAllInOne) el.modeCardAllInOne.classList.toggle('active', isAllInOne);
+    if (el.modeCardIndividual) el.modeCardIndividual.classList.toggle('active', !isAllInOne);
+
+    if (el.completeSectionAllInOne) el.completeSectionAllInOne.style.display = isAllInOne ? 'block' : 'none';
+    if (el.completeSectionIndividual) el.completeSectionIndividual.style.display = !isAllInOne ? 'block' : 'none';
+
+    if (isAllInOne) {
+      await renderUnifiedDocumentView();
+    } else {
+      renderCompleteTable();
+    }
+  }
+
+  // 1) 모든 사용자 서명을 한 장에 기재하여 미리보기 표시
+  async function renderUnifiedDocumentView() {
+    if (!el.unifiedDocPagesContainer) return;
+
+    const totalSigners = state.signers.length;
+    const completedSigners = state.signers.filter(name => !!state.signatures[name]);
+    if (el.unifiedSignCountBadge) {
+      el.unifiedSignCountBadge.textContent = `✍️ 서명 완료: ${completedSigners.length}명 / 전체 대상자: ${totalSigners}명`;
+    }
+
+    el.unifiedDocPagesContainer.innerHTML = '<div style="padding: 2.5rem; text-align: center; color: #64748b;">⏳ 모든 사용자 서명을 취합한 통합 문서를 생성 중입니다...</div>';
+
+    try {
+      const unifiedBytes = await generateUnifiedPdf();
+      state.cachedUnifiedPdfBytes = unifiedBytes;
+      await renderPdfToContainer(unifiedBytes, el.unifiedDocPagesContainer, null, false);
+    } catch (err) {
+      console.error('Unified document render error:', err);
+      el.unifiedDocPagesContainer.innerHTML = '<div style="padding: 2.5rem; text-align: center; color: #ef4444;">통합 서명 문서를 불러오지 못했습니다.</div>';
+    }
+  }
+
+  // 1-1) 통합본 즉시 인쇄
+  async function handlePrintUnifiedPdf() {
+    try {
+      showToast('🖨️ 통합 서명 문서 인쇄 준비 중...');
+      const unifiedBytes = state.cachedUnifiedPdfBytes || await generateUnifiedPdf();
+      printPdfBytes(unifiedBytes, `[통합서명완료]_${state.pdfTemplate.name || '서약서'}`);
+    } catch (err) {
+      console.error('Print unified PDF error:', err);
+      showToast('❌ 통합 문서 인쇄 중 오류가 발생했습니다.');
+    }
+  }
+
+  // 1-2) 통합본 PDF 다운로드
+  async function handleDownloadUnifiedPdf() {
+    try {
+      const unifiedBytes = state.cachedUnifiedPdfBytes || await generateUnifiedPdf();
+      const filename = `[통합서명완료]_모든사용자_${state.pdfTemplate.name || '서약서.pdf'}`;
+      downloadPdfBytes(unifiedBytes, filename);
+    } catch (err) {
+      console.error('Download unified PDF error:', err);
+      showToast('❌ 통합 문서 다운로드 중 오류가 발생했습니다.');
+    }
+  }
+
+  // 1-3) 통합본 전체화면 미리보기 모달
+  async function handlePreviewUnifiedPdf() {
+    try {
+      const unifiedBytes = state.cachedUnifiedPdfBytes || await generateUnifiedPdf();
+      openPdfPreviewModal(`[통합 서명 완료본] ${state.pdfTemplate.name || '서약서'}`, unifiedBytes);
+    } catch (err) {
+      console.error('Preview unified PDF error:', err);
+      showToast('❌ 통합 문서 미리보기 중 오류가 발생했습니다.');
+    }
+  }
+
+  // 2) 사용자 개인별 테이블 렌더링
   function renderCompleteTable() {
+    if (!el.completeTableBody) return;
     el.completeTableBody.innerHTML = '';
 
     const completedSigners = state.signers.filter(name => !!state.signatures[name]);
@@ -1769,7 +2044,10 @@
         <td>${record.signedAt}</td>
         <td>${state.pdfTemplate.name || '서약서 양식.pdf'}</td>
         <td style="text-align: right;">
-          <div style="display: inline-flex; gap: 0.4rem;">
+          <div style="display: inline-flex; gap: 0.4rem; flex-wrap: wrap; justify-content: flex-end;">
+            <button type="button" class="nav-link-btn btn-print-user-pdf" data-name="${name}" title="이 사용자의 서명 문서를 즉시 인쇄합니다">
+              🖨️ 인쇄
+            </button>
             <button type="button" class="nav-link-btn btn-preview-signed-pdf" data-name="${name}">
               👁️ 미리보기
             </button>
@@ -1780,6 +2058,17 @@
         </td>
       `;
       el.completeTableBody.appendChild(tr);
+    });
+
+    // 개별 PDF 즉시 인쇄 이벤트
+    el.completeTableBody.querySelectorAll('.btn-print-user-pdf').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const name = e.currentTarget.getAttribute('data-name');
+        const record = state.signatures[name];
+        if (record && record.pdfBytes) {
+          printPdfBytes(record.pdfBytes, `[서명완료]_${name}_${state.pdfTemplate.name || '서약서'}`);
+        }
+      });
     });
 
     // 개별 PDF 다운로드 이벤트
@@ -1804,6 +2093,40 @@
         }
       });
     });
+  }
+
+  // 2-1) 개인별 전체 일괄 인쇄 (모든 개별 완료 문서를 순차 병합하여 일괄 인쇄)
+  async function handlePrintAllIndividual() {
+    const completedSigners = state.signers.filter(name => !!state.signatures[name]);
+    if (completedSigners.length === 0) {
+      showToast('⚠️ 인쇄할 서명 완료 문서가 없습니다.');
+      return;
+    }
+    if (!window.PDFLib) {
+      showToast('PDFLib 로딩 중입니다...');
+      return;
+    }
+
+    try {
+      showToast(`🖨️ 총 ${completedSigners.length}명의 개별 문서를 일괄 인쇄 준비 중입니다...`);
+      const { PDFDocument } = window.PDFLib;
+      const mergedPdf = await PDFDocument.create();
+
+      for (const name of completedSigners) {
+        const record = state.signatures[name];
+        if (record && record.pdfBytes) {
+          const doc = await PDFDocument.load(record.pdfBytes.slice());
+          const copiedPages = await mergedPdf.copyPages(doc, doc.getPageIndices());
+          copiedPages.forEach(page => mergedPdf.addPage(page));
+        }
+      }
+
+      const mergedBytes = await mergedPdf.save();
+      printPdfBytes(mergedBytes, `[개별서명모음인쇄]_총${completedSigners.length}명`);
+    } catch (err) {
+      console.error('Print all individual error:', err);
+      showToast('❌ 일괄 인쇄 처리 중 오류가 발생했습니다.');
+    }
   }
 
   // 전체 완료 PDF 일괄 다운로드 (ZIP)
@@ -2052,7 +2375,35 @@
       });
     }
 
-    // 관리자: [완료] 메뉴
+    // 관리자: [완료] 메뉴 (출력 모드 전환 및 액션 버튼)
+    if (el.radioModeAllInOne) {
+      el.radioModeAllInOne.addEventListener('change', () => setOutputMode('allInOne'));
+    }
+    if (el.radioModeIndividual) {
+      el.radioModeIndividual.addEventListener('change', () => setOutputMode('individual'));
+    }
+    if (el.modeCardAllInOne) {
+      el.modeCardAllInOne.addEventListener('click', (e) => {
+        if (e.target !== el.radioModeAllInOne) {
+          setOutputMode('allInOne');
+        }
+      });
+    }
+    if (el.modeCardIndividual) {
+      el.modeCardIndividual.addEventListener('click', (e) => {
+        if (e.target !== el.radioModeIndividual) {
+          setOutputMode('individual');
+        }
+      });
+    }
+
+    // 1) 통합본 액션 버튼
+    if (el.btnPrintUnifiedPdf) el.btnPrintUnifiedPdf.addEventListener('click', handlePrintUnifiedPdf);
+    if (el.btnDownloadUnifiedPdf) el.btnDownloadUnifiedPdf.addEventListener('click', handleDownloadUnifiedPdf);
+    if (el.btnPreviewUnifiedPdf) el.btnPreviewUnifiedPdf.addEventListener('click', handlePreviewUnifiedPdf);
+
+    // 2) 개인별 액션 버튼
+    if (el.btnPrintAllIndividual) el.btnPrintAllIndividual.addEventListener('click', handlePrintAllIndividual);
     if (el.btnDownloadAllPdfZip) el.btnDownloadAllPdfZip.addEventListener('click', handleDownloadAllPdfZip);
 
     // 사용자 화면: 성명 입력 및 서명
@@ -2144,6 +2495,7 @@
 
       renderProgressTable();
       renderCompleteTable();
+      updateCompleteTabUI();
       updateDashboardStats();
       refreshAdminAndUserPreview();
     } catch (dbErr) {

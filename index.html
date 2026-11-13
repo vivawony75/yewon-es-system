@@ -342,13 +342,93 @@
       <!-- 3. [완료] 메뉴 탭 -->
       <div class="tab-content" id="tab-complete">
         
-        <div class="card">
+        <!-- 서명 문서 출력 및 다운로드 방식 선택 -->
+        <div class="card" style="margin-bottom: 1.25rem;">
+          <div class="card-title">🖨️ 서명 문서 출력 및 다운로드 방식 선택</div>
+          <p class="card-desc">필요하신 업무 방식에 맞게 출력 형태를 선택해 주세요.</p>
+
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; margin-top: 1rem;">
+            <!-- 선택 1: 모든 사용자 서명을 한 장에 기재하여 출력 (통합 서명본) -->
+            <label class="output-mode-card active" id="modeCardAllInOne">
+              <div style="display: flex; align-items: flex-start; gap: 0.75rem;">
+                <input type="radio" name="outputPrintMode" id="radioModeAllInOne" value="allInOne" checked style="margin-top: 0.25rem;">
+                <div>
+                  <div style="font-size: 1.05rem; font-weight: 800; color: var(--primary-dark); margin-bottom: 0.35rem;">
+                    📑 1. 모든 사용자 서명을 한 장에 기재하여 출력 (통합본)
+                  </div>
+                  <p style="font-size: 0.85rem; color: var(--gray-700); line-height: 1.45; margin: 0;">
+                    양식 문서 1장에 <strong>모든 선생님의 서명을 각자의 이름 옆 칸에 한 번에 날인</strong>하여 한 장의 통합 문서로 출력/다운로드합니다. (학교·기관 보관 및 제출용)
+                  </p>
+                </div>
+              </div>
+            </label>
+
+            <!-- 선택 2: 사용자 개인별로 출력 (개별 서명본) -->
+            <label class="output-mode-card" id="modeCardIndividual">
+              <div style="display: flex; align-items: flex-start; gap: 0.75rem;">
+                <input type="radio" name="outputPrintMode" id="radioModeIndividual" value="individual" style="margin-top: 0.25rem;">
+                <div>
+                  <div style="font-size: 1.05rem; font-weight: 800; color: var(--gray-900); margin-bottom: 0.35rem;">
+                    👤 2. 사용자 개인별로 출력 (개별본)
+                  </div>
+                  <p style="font-size: 0.85rem; color: var(--gray-600); line-height: 1.45; margin: 0;">
+                    선생님 <strong>각 개인별로 서명된 문서를 개별적으로 출력</strong>하거나 한 명씩 PDF를 다운로드(또는 ZIP 일괄 압축 다운로드)합니다. (개인 발급용)
+                  </p>
+                </div>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <!-- 1) 모든 사용자 서명 한 장(통합 문서) 출력 영역 -->
+        <div class="card" id="completeSectionAllInOne">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.75rem;">
+            <div>
+              <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.25rem;">
+                <span class="card-title" style="margin-bottom: 0;">📑 통합 서명 문서 (모든 서명 1장 날인본)</span>
+                <span class="brand-badge" id="unifiedSignCountBadge" style="background: #ecfdf5; color: #047857; font-weight: 700;">
+                  서명 완료 현황 집계 중...
+                </span>
+              </div>
+              <p class="card-desc" style="margin-bottom: 0;">
+                서명을 마친 모든 사용자의 서명이 <strong>각자의 이름 옆 칸 가운데에 자동으로 배치</strong>되어 있는 통합 인쇄 문서입니다.
+              </p>
+            </div>
+            <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+              <button type="button" id="btnPrintUnifiedPdf" class="btn-print" style="padding: 0.6rem 1.2rem; font-size: 0.95rem;">
+                🖨️ 통합 서명본 즉시 인쇄(출력)
+              </button>
+              <button type="button" id="btnDownloadUnifiedPdf" class="btn-primary" style="background: var(--success); padding: 0.6rem 1.2rem; font-size: 0.95rem;">
+                📥 통합 서명본 PDF 다운로드
+              </button>
+              <button type="button" id="btnPreviewUnifiedPdf" class="btn-secondary" style="padding: 0.6rem 1rem; font-size: 0.95rem;">
+                👁️ 크게 보기
+              </button>
+            </div>
+          </div>
+
+          <!-- 통합 서명본 실시간 문서 뷰어 -->
+          <div style="margin-top: 1rem;">
+            <div style="font-size: 0.85rem; font-weight: 700; color: var(--gray-700); margin-bottom: 0.5rem;">
+              📄 통합 서명 인쇄본 미리보기 (모든 서명이 이름 옆 칸에 배치됨)
+            </div>
+            <div class="doc-viewer-frame" id="unifiedDocViewerFrame" style="height: 520px;">
+              <div id="unifiedDocPagesContainer"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 2) 사용자 개인별로 출력 영역 -->
+        <div class="card" id="completeSectionIndividual" style="display: none;">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.25rem; flex-wrap: wrap; gap: 0.75rem;">
             <div>
-              <div class="card-title" style="margin-bottom: 0.2rem;">📥 서명 완료 PDF 문서 발급 및 다운로드</div>
-              <p class="card-desc" style="margin-bottom: 0;">서명이 완료된 최종 PDF 문서를 개별 또는 일괄로 다운로드할 수 있습니다.</p>
+              <div class="card-title" style="margin-bottom: 0.2rem;">👤 개인별 서명 문서 발급 및 출력</div>
+              <p class="card-desc" style="margin-bottom: 0;">선생님 개개인의 서명 문서를 개별 인쇄하거나 다운로드하실 수 있습니다.</p>
             </div>
-            <div style="display: flex; gap: 0.5rem;">
+            <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+              <button type="button" id="btnPrintAllIndividual" class="btn-print">
+                🖨️ 전체 개인별 문서 일괄 인쇄
+              </button>
               <button type="button" id="btnDownloadAllPdfZip" class="btn-primary" style="background: var(--success);">
                 📦 전체 완료 문서 일괄 다운로드 (ZIP)
               </button>
@@ -359,11 +439,11 @@
             <table class="data-table">
               <thead>
                 <tr>
-                  <th style="width: 80px;">번호</th>
+                  <th style="width: 70px;">번호</th>
                   <th>성명</th>
                   <th>서명 완료 일시</th>
                   <th>문서명</th>
-                  <th style="width: 220px; text-align: right;">다운로드 / 미리보기</th>
+                  <th style="width: 280px; text-align: right;">출력 / 다운로드 / 미리보기</th>
                 </tr>
               </thead>
               <tbody id="completeTableBody">

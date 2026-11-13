@@ -894,3 +894,50 @@ body {
     width: 100%;
   }
 }
+
+/* ==========================================================================
+   출력 및 발급 방식 선택 카드 스타일
+   ========================================================================== */
+.output-mode-card {
+  cursor: pointer;
+  border: 2px solid var(--gray-200);
+  border-radius: var(--radius-md);
+  padding: 1.25rem;
+  background: white;
+  display: block;
+  transition: all 0.2s ease;
+  position: relative;
+}
+
+.output-mode-card:hover {
+  border-color: var(--primary);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-sm);
+}
+
+.output-mode-card.active {
+  border-color: var(--primary);
+  background: var(--primary-light);
+  box-shadow: 0 0 0 1px var(--primary);
+}
+
+.btn-print {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.45rem 0.85rem;
+  background: #334155;
+  color: white;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-print:hover {
+  background: #1e293b;
+  transform: translateY(-1px);
+}
+
