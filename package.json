@@ -1,0 +1,20 @@
+{
+  "name": "yewon-electronic-signature",
+  "version": "1.0.0",
+  "description": "예원 전자서명 시스템 - 웹 기반 실시간 전자서명 및 PDF 생성 서비스",
+  "main": "index.html",
+  "scripts": {
+    "start": "npx serve .",
+    "dev": "npx serve ."
+  },
+  "keywords": [
+    "electronic-signature",
+    "pdf-lib",
+    "pdfjs",
+    "firebase",
+    "vercel"
+  ],
+  "author": "Yewon",
+  "license": "MIT",
+  "private": true
+}

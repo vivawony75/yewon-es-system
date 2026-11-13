@@ -4,6 +4,7 @@
 
 (function () {
   'use strict';
+  try {
 
   // ==========================================================================
   // [1] 전역 상태 및 데이터베이스 관리 (IndexedDB)
@@ -86,7 +87,106 @@
     });
   }
 
+  // ==========================================================================
+  // [1-1] Firebase Firestore 클라우드 연동
+  // ==========================================================================
+  let firestore = null;
+
+  function initFirebase() {
+    if (window.firebase && window.APP_CONFIG && window.APP_CONFIG.firebaseConfig) {
+      try {
+        if (!firebase.apps || !firebase.apps.length) {
+          firebase.initializeApp(window.APP_CONFIG.firebaseConfig);
+        }
+        firestore = firebase.firestore();
+        console.log('[예원전자서명] Firebase Firestore 연결 성공');
+        setupFirestoreRealtimeSync();
+      } catch (err) {
+        console.warn('[예원전자서명] Firebase 초기화 경고:', err);
+      }
+    }
+  }
+
+  function setupFirestoreRealtimeSync() {
+    if (!firestore) return;
+    try {
+      // 1. signatures 컬렉션 실시간 구독 (여러 기기 실시간 동기화)
+      firestore.collection('signatures').onSnapshot((snapshot) => {
+        let changed = false;
+        snapshot.forEach((doc) => {
+          const data = doc.data();
+          if (data && data.name) {
+            let signedAtStr = data.signedAt;
+            if (data.signedAt && typeof data.signedAt.toDate === 'function') {
+              signedAtStr = data.signedAt.toDate().toISOString();
+            } else if (!signedAtStr) {
+              signedAtStr = new Date().toISOString();
+            }
+            if (!state.signatures[data.name] || state.signatures[data.name].signedAt !== signedAtStr) {
+              state.signatures[data.name] = {
+                name: data.name,
+                signedAt: signedAtStr,
+                signatureImage: data.signatureImage || '',
+                pdfUrl: data.pdfUrl || null,
+                pdfBlob: state.signatures[data.name]?.pdfBlob || null
+              };
+              changed = true;
+            }
+          }
+        });
+        if (changed) {
+          if (typeof renderProgressTable === 'function') renderProgressTable();
+          if (typeof renderCompleteTable === 'function') renderCompleteTable();
+          if (typeof updateDashboardStats === 'function') updateDashboardStats();
+        }
+      }, (err) => {
+        console.warn('Firestore signatures 구독:', err);
+      });
+
+      // 2. config 컬렉션 실시간 구독 (대상자 및 서명 좌표 공유)
+      firestore.collection('config').doc('system').onSnapshot((doc) => {
+        if (doc.exists) {
+          const cfg = doc.data();
+          let changed = false;
+          if (cfg.signers && Array.isArray(cfg.signers) && cfg.signers.length > 0) {
+            state.signers = cfg.signers;
+            localStorage.setItem('yewon_signers', JSON.stringify(state.signers));
+            changed = true;
+          }
+          if (cfg.sigPosition) {
+            state.sigPosition = { ...state.sigPosition, ...cfg.sigPosition };
+            localStorage.setItem('yewon_sig_position', JSON.stringify(state.sigPosition));
+            changed = true;
+          }
+          if (changed) {
+            if (typeof renderSignersEditor === 'function') renderSignersEditor();
+            if (typeof renderProgressTable === 'function') renderProgressTable();
+            if (typeof renderCompleteTable === 'function') renderCompleteTable();
+            if (typeof updateDashboardStats === 'function') updateDashboardStats();
+          }
+        }
+      }, (err) => {
+        console.warn('Firestore config 구독:', err);
+      });
+    } catch (e) {
+      console.warn('setupFirestoreRealtimeSync error:', e);
+    }
+  }
+
   async function saveSignatureToDB(record) {
+    if (firestore) {
+      try {
+        await firestore.collection('signatures').doc(record.name).set({
+          name: record.name,
+          signedAt: firebase.firestore.Timestamp.fromDate(new Date(record.signedAt || Date.now())),
+          signatureImage: record.signatureImage || '',
+          status: 'signed',
+          updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+      } catch (fErr) {
+        console.warn('Firestore 서명 저장 실패 (IndexedDB 대체):', fErr);
+      }
+    }
     if (!db) return;
     return new Promise((resolve) => {
       try {
@@ -117,6 +217,13 @@
   }
 
   async function removeSignatureFromDB(name) {
+    if (firestore) {
+      try {
+        await firestore.collection('signatures').doc(name).delete();
+      } catch (fErr) {
+        console.warn('Firestore 서명 삭제 실패:', fErr);
+      }
+    }
     if (!db) return;
     return new Promise((resolve) => {
       try {
@@ -151,6 +258,13 @@
     try {
       localStorage.setItem('yewon_signers', JSON.stringify(state.signers));
       localStorage.setItem('yewon_sig_position', JSON.stringify(state.sigPosition));
+      if (firestore) {
+        firestore.collection('config').doc('system').set({
+          signers: state.signers,
+          sigPosition: state.sigPosition,
+          updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        }, { merge: true }).catch(err => console.warn('Firestore config 동기화 오류:', err));
+      }
     } catch (e) {}
   }
 
@@ -355,6 +469,7 @@
     pdfDropzone: document.getElementById('pdfDropzone'),
     pdfFileInput: document.getElementById('pdfFileInput'),
     currentFormName: document.getElementById('currentFormName'),
+    btnAutoExtractNames: document.getElementById('btnAutoExtractNames'),
     btnPreviewCurrentForm: document.getElementById('btnPreviewCurrentForm'),
     btnResetToDefaultForm: document.getElementById('btnResetToDefaultForm'),
     newSignerInput: document.getElementById('newSignerInput'),
@@ -518,9 +633,84 @@
   }
 
   // ==========================================================================
-  // [6] PDF 렌더링 헬퍼 (PDF.js 활용)
+  // [6] PDF 렌더링 헬퍼 & 성명 옆칸 자동 좌표 탐색 (PDF.js 활용)
   // ==========================================================================
-  async function renderPdfToContainer(pdfBytes, containerEl) {
+  
+  // PDF 문서 내에서 로그인한 선생님 성명 위치 및 바로 옆칸 좌표 탐색
+  async function findSignerNameCoordinates(pdfBytes, signerName) {
+    if (!window.pdfjsLib || !pdfBytes || !signerName) return null;
+    try {
+      const loadingTask = pdfjsLib.getDocument({ data: pdfBytes.slice() });
+      const pdf = await loadingTask.promise;
+      const cleanTargetName = signerName.replace(/\s+/g, '');
+      let bestMatch = null;
+
+      for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+        const page = await pdf.getPage(pageNum);
+        const textContent = await page.getTextContent();
+        const items = textContent.items || [];
+        const viewport = page.getViewport({ scale: 1 });
+        const pageWidth = viewport.width;
+        const pageHeight = viewport.height;
+
+        for (let i = 0; i < items.length; i++) {
+          const item = items[i];
+          const cleanStr = (item.str || '').replace(/\s+/g, '');
+
+          if (cleanStr.includes(cleanTargetName)) {
+            const tx = item.transform[4];
+            const ty = item.transform[5];
+            const itemWidth = item.width || (cleanStr.length * 12);
+            const itemHeight = item.height || 14;
+
+            // 이름 바로 우측(옆칸) 좌표 계산
+            let targetX = tx + itemWidth + 12;
+            let targetY = ty - 14;
+            let targetWidth = 105;
+            let targetHeight = 42;
+
+            // 바로 다음 텍스트가 (인), (서명), (인장) 등인 경우 그 위치를 서명란으로 매칭
+            if (i + 1 < items.length) {
+              const nextItem = items[i + 1];
+              const nextStr = (nextItem.str || '').replace(/\s+/g, '');
+              const yDiff = Math.abs(nextItem.transform[5] - ty);
+              if (yDiff < 15 && (nextStr.includes('(인)') || nextStr.includes('(서명)') || nextStr.includes('인') || nextStr.includes('서명'))) {
+                targetX = nextItem.transform[4] - 8;
+                targetY = nextItem.transform[5] - 14;
+              }
+            }
+
+            // 페이지 경계 보정
+            if (targetX + targetWidth > pageWidth - 10) {
+              targetX = Math.max(10, pageWidth - targetWidth - 10);
+            }
+            targetY = Math.max(10, Math.min(pageHeight - targetHeight - 10, targetY));
+
+            bestMatch = {
+              page: pageNum,
+              x: targetX,
+              y: targetY,
+              width: targetWidth,
+              height: targetHeight,
+              found: true
+            };
+
+            // (인) 표기가 포함된 경우 가장 확실한 서명 위치이므로 즉시 반환
+            if (cleanStr.includes('(인)') || cleanStr.includes('서명') || (i + 1 < items.length && items[i + 1].str.includes('인'))) {
+              return bestMatch;
+            }
+          }
+        }
+      }
+
+      return bestMatch;
+    } catch (err) {
+      console.warn('findSignerNameCoordinates error:', err);
+      return null;
+    }
+  }
+
+  async function renderPdfToContainer(pdfBytes, containerEl, customGuideCoord = null) {
     if (!window.pdfjsLib || !pdfBytes) {
       containerEl.innerHTML = '<div style="padding: 2rem; color: #64748b; text-align: center;">PDF 뷰어를 로드하는 중이거나 라이브러리를 연결할 수 없습니다.</div>';
       return;
@@ -533,9 +723,20 @@
       const pdf = await loadingTask.promise;
       containerEl.innerHTML = '';
 
+      // 서명 안내 가이드 박스 좌표 결정 (이름 옆칸 좌표 우선, 없을 시 관리자 기본 설정 좌표)
+      const activeCoord = customGuideCoord || {
+        page: Number(state.sigPosition.page || 1),
+        x: state.sigPosition.x,
+        y: state.sigPosition.y,
+        width: state.sigPosition.width,
+        height: state.sigPosition.height,
+        label: '✍️ 서명 날인 영역'
+      };
+
       for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
         const page = await pdf.getPage(pageNum);
         const viewport = page.getViewport({ scale: 1.2 });
+        const unscaledViewport = page.getViewport({ scale: 1.0 });
 
         const canvasWrapper = document.createElement('div');
         canvasWrapper.style.position = 'relative';
@@ -555,23 +756,22 @@
 
         canvasWrapper.appendChild(canvas);
 
-        // 첫 페이지 또는 서명 대상 페이지에 서명 영역 가이드 박스 표시 (사용자 안내용)
-        if (pageNum === Number(state.sigPosition.page || 1)) {
+        // 해당 페이지에 서명 영역 가이드 박스 표시 (로그인한 이름 옆칸)
+        if (pageNum === Number(activeCoord.page)) {
           const guideBox = document.createElement('div');
           guideBox.style.position = 'absolute';
-          // PDF 좌표(하단 기준)를 HTML 뷰포트 좌표(상단 기준)로 변환
-          const scaleRatio = viewport.width / 595.28; // 기준 뷰포트 배율
-          const boxX = state.sigPosition.x * scaleRatio;
-          const boxY = viewport.height - (state.sigPosition.y + state.sigPosition.height) * scaleRatio;
-          const boxW = state.sigPosition.width * scaleRatio;
-          const boxH = state.sigPosition.height * scaleRatio;
+          const scaleRatio = viewport.width / (unscaledViewport.width || 595.28);
+          const boxX = activeCoord.x * scaleRatio;
+          const boxY = viewport.height - (activeCoord.y + activeCoord.height) * scaleRatio;
+          const boxW = activeCoord.width * scaleRatio;
+          const boxH = activeCoord.height * scaleRatio;
 
           guideBox.style.left = `${boxX}px`;
           guideBox.style.top = `${boxY}px`;
           guideBox.style.width = `${boxW}px`;
           guideBox.style.height = `${boxH}px`;
           guideBox.style.border = '2px dashed #2563eb';
-          guideBox.style.backgroundColor = 'rgba(37, 99, 235, 0.08)';
+          guideBox.style.backgroundColor = 'rgba(37, 99, 235, 0.12)';
           guideBox.style.borderRadius = '4px';
           guideBox.style.pointerEvents = 'none';
           guideBox.style.display = 'flex';
@@ -580,7 +780,7 @@
           guideBox.style.fontSize = '11px';
           guideBox.style.color = '#1d4ed8';
           guideBox.style.fontWeight = 'bold';
-          guideBox.textContent = '✍️ 서명 날인 영역';
+          guideBox.textContent = activeCoord.label || '✍️ 서명 날인 위치 (이름 옆칸)';
           canvasWrapper.appendChild(guideBox);
         }
 
@@ -594,13 +794,13 @@
   }
 
   // ==========================================================================
-  // [7] 서명 합성 PDF 생성 (pdf-lib 활용)
+  // [7] 서명 합성 PDF 생성 (로그인한 이름 옆칸에 자동 날인)
   // ==========================================================================
   async function generateSignedPdf(signerName, signatureDataUrl) {
     if (!window.PDFLib) {
       throw new Error('PDFLib 라이브러리를 사용할 수 없습니다.');
     }
-    const { PDFDocument, rgb, StandardFonts } = window.PDFLib;
+    const { PDFDocument, rgb } = window.PDFLib;
 
     // 양식 원본 바이트 로드
     let templateBytes = state.pdfTemplate.bytes;
@@ -611,48 +811,38 @@
     const pdfDoc = await PDFDocument.load(templateBytes.slice());
     const signatureImage = await pdfDoc.embedPng(signatureDataUrl);
 
+    // 로그인한 선생님 성명의 위치를 PDF 텍스트에서 정밀 탐색 (성명 바로 옆칸)
+    const nameCoord = await findSignerNameCoordinates(templateBytes, signerName);
+
     const pages = pdfDoc.getPages();
-    const targetPageNum = Math.min(Math.max(1, Number(state.sigPosition.page || 1)), pages.length);
+    let targetPageNum;
+    let posX, posY, posW, posH;
+
+    if (nameCoord && nameCoord.found) {
+      targetPageNum = Math.min(Math.max(1, nameCoord.page), pages.length);
+      posX = nameCoord.x;
+      posY = nameCoord.y;
+      posW = nameCoord.width || 105;
+      posH = nameCoord.height || 42;
+      console.log(`[예원전자서명] "${signerName}" 선생님 이름 옆칸 위치에 자동 날인: ${targetPageNum}페이지 (X: ${posX}, Y: ${posY})`);
+    } else {
+      // 텍스트 미발견 시: 관리자 기본 설정 좌표 사용
+      targetPageNum = Math.min(Math.max(1, Number(state.sigPosition.page || 1)), pages.length);
+      posX = Number(state.sigPosition.x || 400);
+      posY = Number(state.sigPosition.y || 120);
+      posW = Number(state.sigPosition.width || 140);
+      posH = Number(state.sigPosition.height || 60);
+    }
+
     const targetPage = pages[targetPageNum - 1];
 
-    const posX = Number(state.sigPosition.x || 400);
-    const posY = Number(state.sigPosition.y || 120);
-    const posW = Number(state.sigPosition.width || 140);
-    const posH = Number(state.sigPosition.height || 60);
-
-    // 지정된 위치에 서명 이미지 날인
+    // 로그인한 선생님 이름 바로 옆칸에 서명 이미지 날인
     targetPage.drawImage(signatureImage, {
       x: posX,
       y: posY,
       width: posW,
       height: posH
     });
-
-    // 선생님 성명 및 날짜 기재
-    try {
-      const font = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-      const fontRegular = await pdfDoc.embedFont(StandardFonts.Helvetica);
-      const dateStr = new Date().toLocaleDateString('ko-KR');
-
-      // 서명 이미지 바로 아래 또는 지정 위치에 기재
-      targetPage.drawText(`Signed by: ${signerName}`, {
-        x: posX,
-        y: Math.max(15, posY - 14),
-        size: 9,
-        font: font,
-        color: rgb(0.2, 0.2, 0.2)
-      });
-
-      targetPage.drawText(`Date: ${dateStr}`, {
-        x: posX,
-        y: Math.max(5, posY - 26),
-        size: 8,
-        font: fontRegular,
-        color: rgb(0.4, 0.4, 0.4)
-      });
-    } catch (fontErr) {
-      console.warn('Font annotation skipped:', fontErr);
-    }
 
     const signedBytes = await pdfDoc.save();
     return signedBytes;
@@ -664,14 +854,26 @@
   
   // 1단계: 성명 확인 처리
   function handleCheckSignerName() {
-    const rawInput = el.signerNameInput.value.trim();
+    const rawInput = el.signerNameInput ? el.signerNameInput.value.trim() : '';
     if (!rawInput) {
       showNameError('성명을 입력해 주세요.');
       return;
     }
 
-    // 이름 일치 검사 (공백 제거 후 비교)
     const normalizedInput = rawInput.replace(/\s+/g, '');
+    const lowerInput = normalizedInput.toLowerCase();
+
+    // 사용자가 가운데 성명 입력창에 'admin' 또는 '관리자'를 적은 경우 자동 안내
+    if (lowerInput === 'admin' || lowerInput === '관리자') {
+      if (el.headerAdminPw) {
+        el.headerAdminPw.focus();
+      }
+      openAdminLoginModal();
+      showToast('⚙️ 관리자 로그인 창입니다. 비밀번호(admin4441#)를 입력해 주세요.');
+      return;
+    }
+
+    // 이름 일치 검사 (공백 제거 후 비교)
     const matchedSigner = state.signers.find(
       s => s.replace(/\s+/g, '') === normalizedInput
     );
@@ -683,7 +885,7 @@
       proceedToSigningStep(matchedSigner);
     } else {
       // 일치하는 성명이 없으면: 요구사항 문구 “다시 입력해 주세요” 표기
-      showNameError('⚠️ 다시 입력해 주세요');
+      showNameError('다시 입력해 주세요');
     }
   }
 
@@ -703,9 +905,13 @@
     el.teacherGreetingTitle.textContent = `${teacherName} 선생님 반갑습니다`;
     el.docFileNameBadge.textContent = state.pdfTemplate.name || '표준 양식 문서';
 
-    // 서명할 양식 문서 미리보기 렌더링
+    // 서명할 양식 문서 미리보기 렌더링 (로그인한 선생님 이름 옆칸 위치에 가이드 박스 표시)
     if (state.pdfTemplate.bytes) {
-      renderPdfToContainer(state.pdfTemplate.bytes, el.userDocPagesContainer);
+      const nameCoord = await findSignerNameCoordinates(state.pdfTemplate.bytes, teacherName);
+      if (nameCoord && nameCoord.found) {
+        nameCoord.label = `✍️ ${teacherName} 선생님 서명 위치`;
+      }
+      renderPdfToContainer(state.pdfTemplate.bytes, el.userDocPagesContainer, nameCoord);
     }
 
     // 캔버스 초기화
@@ -806,9 +1012,20 @@
   
   // 상단 우측 인라인 관리자 로그인 처리
   function handleHeaderLogin(e) {
-    if (e) e.preventDefault();
+    if (e && e.preventDefault) e.preventDefault();
     const inputId = el.headerAdminId ? el.headerAdminId.value.trim() : '';
     const inputPw = el.headerAdminPw ? el.headerAdminPw.value : '';
+
+    if (!inputId) {
+      showToast('⚠️ 관리자 아이디를 입력해 주세요.');
+      if (el.headerAdminId) el.headerAdminId.focus();
+      return;
+    }
+    if (!inputPw) {
+      showToast('⚠️ 관리자 비밀번호를 입력해 주세요.');
+      if (el.headerAdminPw) el.headerAdminPw.focus();
+      return;
+    }
 
     const targetId = window.APP_CONFIG?.adminId || 'admin';
     const targetPw = window.APP_CONFIG?.adminPassword || 'admin4441#';
@@ -975,6 +1192,88 @@
   // [10] 관리자 [시작] 메뉴 로직 (양식 업로드 & 대상자 관리)
   // ==========================================================================
   
+  // 한국 주요 성씨 (100대 성씨)
+  const KOREAN_SURNAMES = new Set([
+    '김', '이', '박', '최', '정', '강', '조', '윤', '장', '임', '한', '오', '서', '신', '권', '황', '안',
+    '송', '류', '유', '홍', '고', '문', '양', '손', '배', '백', '허', '남', '심', '노', '하', '곽', '성',
+    '차', '주', '우', '구', '라', '전', '민', '진', '지', '엄', '채', '원', '천', '방', '공', '현', '함',
+    '변', '염', '여', '추', '도', '소', '석', '선', '설', '마', '길', '연', '위', '표', '명', '기', '반',
+    '왕', '금', '옥', '육', '인', '맹', '제', '모', '탁', '국', '어', '은', '편', '용', '예', '경', '봉'
+  ]);
+
+  // 문서 일반 단어 불용어 (성명 오인 방지)
+  const EXCLUDED_WORDS = new Set([
+    '서약서', '동의서', '확인서', '신청서', '계약서', '보안서', '각서', '안내서', '설명서', '보고서',
+    '선생님', '담당자', '신청인', '서약자', '동의자', '대상자', '관계자', '관리자', '대표자', '확인자',
+    '개인정보', '전자서명', '수집이용', '이용동의', '제공동의', '고유식별', '주민등록', '생년월일', '전화번호',
+    '대한민국', '유효기간', '작성일자', '제출일자', '서명날인', '자필서명', '주의사항', '준수사항', '확인사항',
+    '비밀유지', '업무보안', '안전관리', '정보보호', '처리방침', '학교장', '위원장', '부장교사', '교무부장',
+    '서명란', '날인란', '도장날인', '페이지', '내용확인', '전체내용', '상기인', '본인은', '위사람', '위내용'
+  ]);
+
+  function isValidKoreanName(name) {
+    if (!name || typeof name !== 'string') return false;
+    name = name.trim();
+    if (name.length < 2 || name.length > 4) return false;
+    if (!/^[가-힣]+$/.test(name)) return false;
+    if (EXCLUDED_WORDS.has(name)) return false;
+    const firstChar = name.charAt(0);
+    return KOREAN_SURNAMES.has(firstChar);
+  }
+
+  // PDF 문서 텍스트에서 서명 대상자 성명 자동 추출 엔진
+  async function extractNamesFromPdf(pdfBytes) {
+    if (!window.pdfjsLib || !pdfBytes) return [];
+    try {
+      const loadingTask = pdfjsLib.getDocument({ data: pdfBytes.slice() });
+      const pdf = await loadingTask.promise;
+      const foundNames = new Set();
+      let combinedAllText = '';
+
+      for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+        const page = await pdf.getPage(pageNum);
+        const textContent = await page.getTextContent();
+        const items = textContent.items || [];
+        const pageText = items.map(it => it.str).join(' ');
+        combinedAllText += '\n' + pageText;
+
+        // 패턴 1: 라벨 뒤에 이름이 오는 경우 (성명: 홍길동, 이름: 김철수, 서약자: 이영희 등)
+        const labelRegexes = [
+          /(?:성\s*명|이\s*름|서\s*약\s*자|신\s*청\s*인|동\s*의\s*자|대\s*상\s*자|교\s*사|선\s*생\s*님|담\s*당\s*자|성\s*함)\s*[:：\-_·\s]\s*([가-힣]{2,4})/g,
+          /([가-힣]{2,4})\s*(?:\(인\)|\(서명\)|\(인장\)|\(자필\)|\(서명\/인\))/g,
+          /(?:서\s*명|날\s*인)\s*[:：\s]\s*([가-힣]{2,4})/g,
+          /([가-힣]{2,4})\s*(?:선생님|교사|귀하)/g,
+          /(?:서약인|신청자|동의인|서명자)\s*([가-힣]{2,4})/g
+        ];
+
+        for (const reg of labelRegexes) {
+          let match;
+          while ((match = reg.exec(pageText)) !== null) {
+            const candidate = match[1].trim();
+            if (isValidKoreanName(candidate)) {
+              foundNames.add(candidate);
+            }
+          }
+        }
+      }
+
+      // 패턴 2: 표(Table) 또는 명단 목록 (1. 홍길동, 2. 김영희 등)
+      const listRegex = /(?:[0-9]+[.)\s]|①|②|③|④|⑤|⑥|⑦|⑧|⑨|⑩)\s*([가-힣]{2,4})/g;
+      let listMatch;
+      while ((listMatch = listRegex.exec(combinedAllText)) !== null) {
+        const candidate = listMatch[1].trim();
+        if (isValidKoreanName(candidate)) {
+          foundNames.add(candidate);
+        }
+      }
+
+      return Array.from(foundNames);
+    } catch (err) {
+      console.warn('PDF 성명 자동 추출 중 오류:', err);
+      return [];
+    }
+  }
+
   // PDF 양식 파일 업로드 처리
   async function handlePdfUpload(file) {
     if (!file || file.type !== 'application/pdf') {
@@ -993,15 +1292,79 @@
       // IndexedDB에 저장
       await saveFileToDB('activeTemplate', bytes, file.name);
 
-      showToast(`📄 양식 파일 "${file.name}" 등록이 완료되었습니다.`);
-
       // 사용자 뷰 미리보기 즉시 갱신
       if (el.userDocPagesContainer) {
         renderPdfToContainer(bytes, el.userDocPagesContainer);
       }
+
+      // PDF 텍스트에서 서명 대상자 성명 자동 감지
+      showToast('📄 PDF를 등록하고 문서 내 대상자 이름을 분석하는 중입니다...', 2500);
+      const detectedNames = await extractNamesFromPdf(bytes);
+
+      if (detectedNames && detectedNames.length > 0) {
+        // 기존 기본 샘플 명단('홍길동', '김영희', '이철수', '박민수', '정수진')만 있는 경우 실제 감지된 명단으로 교체
+        const defaultSampleNames = ['홍길동', '김영희', '이철수', '박민수', '정수진'];
+        const isOnlyDefaults = state.signers.length === defaultSampleNames.length &&
+          state.signers.every(s => defaultSampleNames.includes(s));
+
+        if (isOnlyDefaults) {
+          state.signers = [...detectedNames];
+        } else {
+          detectedNames.forEach(n => {
+            if (!state.signers.includes(n)) {
+              state.signers.push(n);
+            }
+          });
+        }
+
+        saveLocalSettings();
+        renderSignerTags();
+        renderProgressTable();
+        updateDashboardStats();
+        if (typeof saveConfigToFirestore === 'function') {
+          saveConfigToFirestore();
+        }
+
+        showToast(`✨ PDF에서 ${detectedNames.length}명의 서명 대상자(${detectedNames.join(', ')})를 자동 인식하여 등록했습니다!`, 5000);
+      } else {
+        showToast(`📄 양식 파일 "${file.name}" 등록이 완료되었습니다. (문서에서 이름을 찾지 못해 기존 명단을 유지합니다)`, 4000);
+      }
     } catch (err) {
       console.error('File upload error:', err);
       showToast('❌ 파일 처리 중 오류가 발생했습니다.');
+    }
+  }
+
+  // 수동: 현재 등록된 PDF에서 대상자 성명 다시 추출하기
+  async function handleManualAutoExtractNames() {
+    if (!state.pdfTemplate.bytes) {
+      showToast('⚠️ 먼저 PDF 양식 파일을 업로드해 주세요.');
+      return;
+    }
+
+    showToast('🔍 PDF 문서 내 성명을 다시 분석하고 있습니다...', 2000);
+    const detectedNames = await extractNamesFromPdf(state.pdfTemplate.bytes);
+
+    if (detectedNames && detectedNames.length > 0) {
+      let added = 0;
+      detectedNames.forEach(n => {
+        if (!state.signers.includes(n)) {
+          state.signers.push(n);
+          added++;
+        }
+      });
+
+      saveLocalSettings();
+      renderSignerTags();
+      renderProgressTable();
+      updateDashboardStats();
+      if (typeof saveConfigToFirestore === 'function') {
+        saveConfigToFirestore();
+      }
+
+      showToast(`✨ PDF에서 총 ${detectedNames.length}명 인식 완료! (신규 ${added}명 등록)`, 4000);
+    } else {
+      showToast('⚠️ 문서 내에서 성명 형식(예: 성명: 홍길동 등)을 찾지 못했습니다.');
     }
   }
 
@@ -1397,9 +1760,25 @@
       });
     }
 
-    // 상단 우측 아담한 관리자 로그인 폼 제출
+    // 상단 우측 아담한 관리자 로그인 폼 및 버튼 리스너
     if (el.headerAdminLoginForm) {
       el.headerAdminLoginForm.addEventListener('submit', handleHeaderLogin);
+    }
+    if (el.btnHeaderLogin) {
+      el.btnHeaderLogin.addEventListener('click', handleHeaderLogin);
+    }
+    if (el.headerAdminPw) {
+      el.headerAdminPw.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') handleHeaderLogin(e);
+      });
+    }
+    if (el.headerAdminId) {
+      el.headerAdminId.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          if (el.headerAdminPw) el.headerAdminPw.focus();
+          else handleHeaderLogin(e);
+        }
+      });
     }
 
     // 관리자 바 버튼 (사용자 화면 전환, 관리자 대시보드 복귀, 로그아웃)
@@ -1446,6 +1825,7 @@
       });
     }
 
+    if (el.btnAutoExtractNames) el.btnAutoExtractNames.addEventListener('click', handleManualAutoExtractNames);
     if (el.btnPreviewCurrentForm) {
       el.btnPreviewCurrentForm.addEventListener('click', () => {
         if (state.pdfTemplate.bytes) {
@@ -1540,6 +1920,7 @@
 
     // 3. 비동기 데이터베이스 및 양식 로드 (오류 발생해도 UI 동작 보장)
     try {
+      initFirebase();
       await initDB();
 
       // 저장된 양식 파일 불러오기
@@ -1590,6 +1971,15 @@
     document.addEventListener('DOMContentLoaded', bootstrap);
   } else {
     bootstrap();
+  }
+
+  } catch (globalAppError) {
+    console.error('FATAL APP.JS ERROR:', globalAppError);
+    var d = document.createElement('div');
+    d.id = 'FATAL_APP_ERROR';
+    d.style.cssText = 'background:red;color:white;padding:20px;font-size:16px;position:fixed;top:0;left:0;z-index:999999;';
+    d.textContent = '치명적 스크립트 오류: ' + (globalAppError ? (globalAppError.stack || globalAppError.message || globalAppError) : '알 수 없음');
+    document.body.appendChild(d);
   }
 
 })();

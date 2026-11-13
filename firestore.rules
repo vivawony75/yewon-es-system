@@ -1,0 +1,98 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: signatures
+    // Document ID: {signerId} (서명자의 성명 또는 고유 ID)
+    // Fields:
+    //   - name: string (required, 1..100 chars) - 서명자 성명
+    //   - signedAt: timestamp (required) - 서명 일시
+    //   - signatureImage: string (required, max 500,000 chars) - 서명 이미지 Data URL 또는 웹 URL
+    //   - pdfUrl: string (optional, max 2048 chars) - 완성 문서 URL
+    //   - status: string (optional, 'signed' | 'completed' | 'pending' | 'rejected')
+    //   - updatedAt: timestamp (optional)
+    //
+    // Collection: config
+    // Document ID: {configId} (예: 'system', 'template')
+    // Fields:
+    //   - signers: list (optional, max 1000 items) - 대상자 명단
+    //   - sigPosition: map (optional) - 서명 날인 좌표
+    //   - title: string (optional, max 200 chars)
+    //   - updatedAt: timestamp (optional)
+    // ===============================================================
+
+    // 1. 유효성 검증 함수
+    function isValidUrl(url) {
+      return url is string &&
+        url.size() <= 2048 &&
+        (url.matches("^https://.*") || url.matches("^http://.*"));
+    }
+
+    function isValidSignatureData(data) {
+      return data is string &&
+        data.size() > 0 &&
+        data.size() <= 500000 &&
+        (
+          data.matches("^data:image/.*") ||
+          data.matches("^https://.*") ||
+          data.matches("^http://.*")
+        );
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    // 2. 도메인 유효성 검사 (입력 데이터 스키마 및 DoS 방지)
+    function isValidSignature(data) {
+      let allowedFields = [
+        'name', 'signedAt', 'signatureImage', 'pdfUrl',
+        'signerId', 'phone', 'phoneNumber', 'status',
+        'ipAddress', 'userAgent', 'verified', 'createdAt', 'updatedAt'
+      ];
+      let validStatuses = ['signed', 'completed', 'pending', 'rejected'];
+
+      return hasOnlyAllowedFields(allowedFields) &&
+        ('name' in data && data.name is string && data.name.size() >= 1 && data.name.size() <= 100) &&
+        ('signedAt' in data) &&
+        ('signatureImage' in data && isValidSignatureData(data.signatureImage)) &&
+        (!('pdfUrl' in data) || isValidUrl(data.pdfUrl)) &&
+        (!('status' in data) || (data.status is string && data.status in validStatuses));
+    }
+
+    function isValidConfig(data) {
+      let allowedFields = ['signers', 'sigPosition', 'title', 'updatedAt', 'templateName', 'createdAt'];
+
+      return hasOnlyAllowedFields(allowedFields) &&
+        (!('title' in data) || (data.title is string && data.title.size() <= 200)) &&
+        (!('signers' in data) || (data.signers is list && data.signers.size() <= 1000)) &&
+        (!('sigPosition' in data) || data.sigPosition is map);
+    }
+
+    // 3. 컬렉션 접근 규칙
+    match /signatures/{signerId} {
+      // 서명 상태 확인 및 관리자 대시보드 조회를 위한 열람 허용
+      allow read: if true;
+
+      // 엄격한 스키마 유효성 검사를 통과한 서명만 생성 및 수정 가능
+      allow create, update: if isValidSignature(request.resource.data);
+
+      // 서명 초기화(삭제) 허용
+      allow delete: if true;
+    }
+
+    match /config/{configId} {
+      // 양식 및 서명 좌표, 대상자 명단 열람
+      allow read: if true;
+
+      // 설정 저장 시 스키마 유효성 검사 수행
+      allow create, update: if isValidConfig(request.resource.data);
+      allow delete: if true;
+    }
+  }
+}

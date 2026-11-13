@@ -31,11 +31,11 @@
       </a>
       <div class="header-nav">
         <!-- 상단 우측: 작고 아담한 관리자 로그인 입력창 -->
-        <form id="headerAdminLoginForm" class="header-admin-login-form" autocomplete="off">
+        <form id="headerAdminLoginForm" class="header-admin-login-form" autocomplete="off" onsubmit="return false;">
           <span class="header-login-badge">⚙️ 관리자</span>
-          <input type="text" id="headerAdminId" class="header-mini-input" placeholder="아이디" value="admin" required title="관리자 아이디 (기본: admin)">
-          <input type="password" id="headerAdminPw" class="header-mini-input" placeholder="비밀번호" required title="관리자 비밀번호 (기본: admin4441#)">
-          <button type="submit" id="btnHeaderLogin" class="header-mini-btn">로그인</button>
+          <input type="text" id="headerAdminId" class="header-mini-input" placeholder="아이디" value="admin" title="관리자 아이디 (기본: admin)">
+          <input type="password" id="headerAdminPw" class="header-mini-input" placeholder="비밀번호" title="관리자 비밀번호 (기본: admin4441#)">
+          <button type="button" id="btnHeaderLogin" class="header-mini-btn">로그인</button>
         </form>
 
         <!-- 로그인 완료 시 표시되는 관리자 제어 바 -->
@@ -171,13 +171,13 @@
         
         <!-- 양식 파일 업로드 -->
         <div class="card">
-          <div class="card-title">📄 양식 파일 업로드</div>
-          <p class="card-desc">선생님들께서 서명하실 서약서, 동의서 등의 PDF 양식 파일을 등록합니다.</p>
+          <div class="card-title">📄 양식 파일 업로드 (문서 내 대상자 성명 자동 인식)</div>
+          <p class="card-desc">PDF 양식 파일을 등록하면 <strong>문서에 기재된 선생님 성명을 자동으로 분석하여 서명 대상자로 자동 등록</strong>합니다.</p>
           
           <div class="upload-dropzone" id="pdfDropzone">
             <div class="upload-icon">📤</div>
             <div class="upload-text">PDF 양식 파일을 이곳으로 끌어다 놓거나 클릭하여 선택하세요</div>
-            <div class="upload-sub">권장 형식: .pdf (문서 내 서명란 위치에 자동 합성됩니다)</div>
+            <div class="upload-sub">💡 PDF 안의 성명(이름)을 자동으로 읽어서 서명 대상자로 등록해 드립니다.</div>
             <input type="file" id="pdfFileInput" accept="application/pdf" style="display: none;">
           </div>
 
@@ -186,7 +186,8 @@
               <span>📌 현재 등록된 양식:</span>
               <span id="currentFormName" style="color: var(--primary);">기본 표준 서약서 양식 (내장 템플릿)</span>
             </div>
-            <div style="display: flex; gap: 0.5rem;">
+            <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+              <button type="button" id="btnAutoExtractNames" class="nav-link-btn primary">✨ PDF에서 성명 자동 추출</button>
               <button type="button" id="btnPreviewCurrentForm" class="nav-link-btn">미리보기</button>
               <button type="button" id="btnResetToDefaultForm" class="nav-link-btn">기본 양식으로 복원</button>
             </div>
@@ -196,7 +197,7 @@
         <!-- 서명 대상자 관리 -->
         <div class="card">
           <div class="card-title">👥 서명 대상자 (선생님) 명단 관리</div>
-          <p class="card-desc">입력된 성명과 일치하는 선생님만 본인 확인 후 서명란이 제시됩니다.</p>
+          <p class="card-desc">PDF 파일에서 자동으로 인식된 성명이 아래에 등록됩니다. (필요 시 직접 추가하거나 수정·삭제하실 수도 있습니다)</p>
           
           <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem;">
             <input type="text" id="newSignerInput" class="input-field" placeholder="추가할 선생님 성명 입력 (쉼표나 공백으로 여러 명 입력 가능: 예: 김철수, 이영희)">
@@ -420,6 +421,12 @@
   <div class="toast" id="appToast">알림 메시지</div>
 
   <!-- 자바스크립트 로직 -->
+  <!-- Firebase SDK (Compat) -->
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
+
+  <!-- 애플리케이션 스크립트 -->
   <script src="config.js"></script>
   <script src="app.js"></script>
 </body>

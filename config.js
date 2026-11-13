@@ -1,12 +1,19 @@
 /**
- * [예원전자서명시스템] 기본 설정 파일
- * 
- * 💡 관리자 계정 정보 (아이디/비밀번호)
- * - 관리자 아이디 또는 비밀번호 변경이 필요하신 경우,
- *   안티그래비티 채팅창에 "관리자 비밀번호를 ~로 바꿔줘"라고 말씀하시거나
- *   아래의 adminId, adminPassword 값을 직접 수정하시면 됩니다.
+ * [예원전자서명시스템] 기본 설정 파일 (config.js)
  */
 window.APP_CONFIG = {
+  // Firebase 클라우드 연동 설정
+  firebaseConfig: {
+    apiKey: "AIzaSyBMIJJv1LPvzZhOkGHqveaYeXKQ7myhNXE",
+    authDomain: "yewon-es-system.firebaseapp.com",
+    databaseURL: "https://yewon-es-system-default-rtdb.firebaseio.com",
+    projectId: "yewon-es-system",
+    storageBucket: "yewon-es-system.firebasestorage.app",
+    messagingSenderId: "734443453114",
+    appId: "1:734443453114:web:830b4a235983838dcd6083",
+    measurementId: "G-DY4CTW2FWC"
+  },
+
   // 관리자 아이디
   adminId: 'admin',
   
@@ -16,7 +23,7 @@ window.APP_CONFIG = {
   // 시스템 명칭
   systemTitle: '예원 전자서명 시스템',
   
-  // 기본 서명 대상자 예시 명단 (양식 업로드 전 기본값)
+  // 기본 서명 대상자 예시 명단
   defaultSigners: [
     '홍길동',
     '김영희',
