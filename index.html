@@ -137,8 +137,11 @@
     <!-- ============================================== -->
     <section id="adminViewSection" style="display: none;">
       
-      <!-- 상단 탭 네비게이션: [시작], [진행], [완료] -->
-      <nav class="admin-tab-nav">
+      <!-- 상단 탭 네비게이션: [새 문서 만들기], [시작], [진행], [완료] -->
+      <nav class="admin-tab-nav" style="display: flex; gap: 0.5rem; align-items: stretch;">
+        <button type="button" id="btnCreateNewDoc" class="tab-btn-create" style="background: linear-gradient(135deg, #10b981, #059669); color: white; border: none; border-radius: var(--radius-md); padding: 0.75rem 1.25rem; font-size: 0.95rem; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem; white-space: nowrap; box-shadow: 0 2px 4px rgba(16, 185, 129, 0.25); transition: all 0.15s ease;">
+          ➕ 새 문서 만들기
+        </button>
         <button type="button" class="tab-btn active" data-tab="tab-start">
           🚀 [시작] 양식 & 대상자 등록
         </button>
@@ -150,29 +153,85 @@
         </button>
       </nav>
 
+      <!-- [시작] [진행] [완료] 메뉴 아래: 진행 중이거나 완료된 서류 리스트 (3개 넘어가면 스크롤) -->
+      <div class="card doc-list-card" style="margin-bottom: 1.25rem; padding: 1rem 1.25rem; background: #ffffff; border: 1.5px solid var(--gray-200); border-radius: var(--radius-md); box-shadow: var(--shadow-sm);">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; flex-wrap: wrap; gap: 0.5rem;">
+          <div style="font-weight: 800; font-size: 1rem; color: var(--gray-800); display: flex; align-items: center; gap: 0.5rem;">
+            📑 작성된 서류 목록 (진행 중 / 완료)
+            <span id="docCountBadge" class="badge badge-pending" style="font-size: 0.75rem; padding: 0.2rem 0.55rem;">0건</span>
+          </div>
+          <span style="font-size: 0.8rem; color: var(--gray-500);">💡 [수정]을 누르면 해당 서류를 불러와 양식·명단 편집 및 서명 현황을 관리할 수 있습니다.</span>
+        </div>
+        
+        <!-- 3개 초과 시 부드러운 스크롤 처리 컨테이너 (max-height: 220px) -->
+        <div id="docListContainer" class="doc-list-scrollable" style="max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; padding-right: 4px;">
+          <!-- 자바스크립트로 서류 리스트 아이템이 렌더링됩니다 -->
+        </div>
+      </div>
+
       <!-- 1. [시작] 메뉴 탭 -->
       <div class="tab-content active" id="tab-start">
         
-        <!-- 양식 파일 업로드 -->
+        <!-- 양식 파일 설정 (자동 양식 생성 / PDF 업로드) -->
         <div class="card">
-          <div class="card-title">📄 양식 파일 업로드 (문서 내 대상자 성명 자동 인식)</div>
-          <p class="card-desc">PDF 양식 파일을 등록하면 <strong>문서에 기재된 선생님 성명을 자동으로 분석하여 서명 대상자로 자동 등록</strong>합니다.</p>
+          <div class="card-title">📄 서명 양식 설정 (자동 양식 생성 / PDF 파일 업로드)</div>
+          <p class="card-desc">원하시는 방식을 선택하세요: <strong>제목과 명단으로 2열 표 양식을 자동 생성</strong>하거나, <strong>기존 PDF 파일</strong>을 직접 업로드하여 사용하실 수 있습니다.</p>
           
-          <div class="upload-dropzone" id="pdfDropzone">
-            <div class="upload-icon">📤</div>
-            <div class="upload-text">PDF 양식 파일을 이곳으로 끌어다 놓거나 클릭하여 선택하세요</div>
-            <div class="upload-sub">💡 PDF 안의 성명(이름)을 자동으로 읽어서 서명 대상자로 등록해 드립니다.</div>
-            <input type="file" id="pdfFileInput" accept="application/pdf" style="display: none;">
+          <!-- 방식 선택 탭 버튼 -->
+          <div style="display: flex; gap: 0.5rem; margin-bottom: 1.25rem;">
+            <button type="button" id="btnModeAutoForm" class="nav-link-btn primary" style="flex: 1; padding: 0.75rem; font-size: 0.95rem; justify-content: center; font-weight: 700;">
+              ✨ 1. 제목 & 명단 기반 표 양식 자동 생성
+            </button>
+            <button type="button" id="btnModeUploadPdf" class="nav-link-btn" style="flex: 1; padding: 0.75rem; font-size: 0.95rem; justify-content: center; font-weight: 700;">
+              📤 2. 기존 PDF 파일 직접 업로드
+            </button>
+          </div>
+
+          <!-- 방식 1: 자동 양식 생성 섹션 -->
+          <div id="sectionAutoForm" style="display: block; background: #f8fafc; border: 1.5px solid var(--gray-200); border-radius: var(--radius-md); padding: 1.25rem; margin-bottom: 1rem;">
+            <div style="display: grid; grid-template-columns: 1fr; gap: 1rem; margin-bottom: 1rem;">
+              <div>
+                <label style="font-size: 0.9rem; font-weight: 700; color: var(--gray-800); display: block; margin-bottom: 0.4rem;">
+                  📌 문서 제목 <span style="font-size: 0.8rem; font-weight: 400; color: var(--gray-500);">(작성되는 문서 최상단 중앙에 크게 표기)</span>
+                </label>
+                <input type="text" id="autoFormTitle" class="input-field" placeholder="예: 2026학년도 교직원 보안 및 청렴 서약서" value="2026학년도 교직원 보안 및 청렴 서약서">
+              </div>
+
+              <div>
+                <label style="font-size: 0.9rem; font-weight: 700; color: var(--gray-800); display: block; margin-bottom: 0.4rem;">
+                  🏢 부서 또는 담당자명 <span style="font-size: 0.8rem; font-weight: 400; color: var(--gray-500);">(제목 우측 아래에 제목보다 작은 글씨로 표기)</span>
+                </label>
+                <input type="text" id="autoFormDept" class="input-field" placeholder="예: 교무기획부 / 담당자: 교사 홍길동" value="교무기획부 / 담당자: 교사 홍길동">
+              </div>
+            </div>
+
+            <div style="background: white; border: 1px solid var(--gray-200); border-radius: var(--radius-sm); padding: 0.85rem 1rem; font-size: 0.85rem; color: var(--gray-600); margin-bottom: 1rem;">
+              💡 <strong>2열 표 자동 분할 규칙:</strong> 전체 서명 대상자가 <em>n</em>명일 때, <strong>왼쪽에 1번부터 세로로 ⌈n/2⌉번</strong>까지, <strong>오른쪽에 그 다음 번호부터 끝번호</strong>까지 배치되며(홀수면 왼쪽에 한 명 더 배치), 각 행마다 <strong>[연번], [성명], [서명란]</strong>이 자동으로 생성됩니다.
+            </div>
+
+            <button type="button" id="btnGenerateAutoForm" class="btn-primary" style="width: 100%; display: flex; align-items: center; justify-content: center; gap: 0.5rem; font-size: 1rem;">
+              ✨ 이 설정과 명단으로 표 양식 자동 생성 및 문서 반영
+            </button>
+          </div>
+
+          <!-- 방식 2: PDF 파일 직접 업로드 섹션 -->
+          <div id="sectionUploadPdf" style="display: none;">
+            <div class="upload-dropzone" id="pdfDropzone">
+              <div class="upload-icon">📤</div>
+              <div class="upload-text">PDF 양식 파일을 이곳으로 끌어다 놓거나 클릭하여 선택하세요</div>
+              <div class="upload-sub">💡 PDF 안의 성명(이름)을 자동으로 읽어서 서명 대상자로 등록해 드립니다.</div>
+              <input type="file" id="pdfFileInput" accept="application/pdf" style="display: none;">
+            </div>
           </div>
 
           <div class="current-form-badge">
             <div class="form-info">
               <span>📌 현재 등록된 양식:</span>
-              <span id="currentFormName" style="color: var(--primary);">기본 표준 서약서 양식 (내장 템플릿)</span>
+              <span id="currentFormName" style="color: var(--primary);">2열 표준 표 양식 (자동 생성)</span>
             </div>
             <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
-              <button type="button" id="btnAutoExtractNames" class="nav-link-btn primary">✨ PDF에서 성명 자동 추출</button>
-              <button type="button" id="btnPreviewCurrentForm" class="nav-link-btn">미리보기</button>
+              <button type="button" id="btnAutoExtractNames" class="nav-link-btn primary" style="display: none;">✨ PDF에서 성명 자동 추출</button>
+              <button type="button" id="btnPreviewCurrentForm" class="nav-link-btn">👁️ 미리보기</button>
               <button type="button" id="btnResetToDefaultForm" class="nav-link-btn">기본 양식으로 복원</button>
             </div>
           </div>
@@ -515,7 +574,7 @@
   <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
 
   <!-- 애플리케이션 스크립트 -->
-  <script src="config.js?v=20261113_1515"></script>
-  <script src="app.js?v=20261113_1515"></script>
+  <script src="config.js?v=20261114_0122"></script>
+  <script src="app.js?v=20261114_0122"></script>
 </body>
 </html>

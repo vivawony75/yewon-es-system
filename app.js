@@ -19,10 +19,16 @@
     currentSignerName: null,
     currentOutputMode: 'allInOne', // 'allInOne' (한 장에 모든 서명 기재) or 'individual' (개인별)
     cachedUnifiedPdfBytes: null,
+    documents: [], // 다중 서류 관리 목록 [{ id, title, dept, createdAt, updatedAt, signers, signatures, ... }]
+    currentDocId: null, // 현재 작업 중인 서류 ID
     signers: [...(window.APP_CONFIG?.defaultSigners || ['홍길동', '김영희', '이철수', '박민수', '정수진'])],
     signatures: {}, // name -> { name, signedAt, signatureImage, pdfBlob }
+    isAutoFormMode: true,
+    autoFormTitle: localStorage.getItem('yewon_auto_title') || '2026학년도 교직원 보안 및 청렴 서약서',
+    autoFormDept: localStorage.getItem('yewon_auto_dept') || '교무기획부 / 담당자: 교사 홍길동',
+    autoFormPositions: {}, // name -> { page, x, y, width, height }
     pdfTemplate: {
-      name: '기본 표준 서약서 양식.pdf',
+      name: '2026학년도 교직원 보안 및 청렴 서약서.pdf',
       bytes: null
     },
     sigPosition: {
@@ -178,9 +184,16 @@
   async function saveSignatureToDB(record) {
     if (firestore) {
       try {
+        let tsDate = new Date();
+        if (record.signedAt) {
+          const parsed = new Date(record.signedAt);
+          if (!isNaN(parsed.getTime())) {
+            tsDate = parsed;
+          }
+        }
         await firestore.collection('signatures').doc(record.name).set({
           name: record.name,
-          signedAt: firebase.firestore.Timestamp.fromDate(new Date(record.signedAt || Date.now())),
+          signedAt: firebase.firestore.Timestamp.fromDate(tsDate),
           signatureImage: record.signatureImage || '',
           status: 'signed',
           updatedAt: firebase.firestore.FieldValue.serverTimestamp()
@@ -271,149 +284,228 @@
   }
 
   // ==========================================================================
-  // [2] 기본 표준 서약서 PDF 자동 생성 (템플릿이 없을 때 즉시 동작)
+  // [2] 2열 표준 표 양식 자동 생성 (제목, 부서/담당자명, 연번·성명·서명란 표)
+  // ==========================================================================
+  async function generateAutoTablePdf(title, dept, signers) {
+    if (!window.PDFLib) {
+      throw new Error('PDFLib 라이브러리를 사용할 수 없습니다.');
+    }
+    const { PDFDocument } = window.PDFLib;
+
+    const docTitle = (title || state.autoFormTitle || '2026학년도 교직원 보안 및 청렴 서약서').trim();
+    const docDept = (dept !== undefined ? dept : state.autoFormDept || '').trim();
+    const signerList = Array.isArray(signers) && signers.length > 0 
+      ? signers 
+      : (state.signers && state.signers.length > 0 ? state.signers : ['홍길동', '김영희', '이철수', '박민수', '정수진']);
+
+    // A4 규격: 595.28 pt x 841.89 pt (고화질 2배율 Canvas: 1191 x 1684 px)
+    const scale = 2.0;
+    const canvasW = Math.round(595.28 * scale);
+    const canvasH = Math.round(841.89 * scale);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = canvasW;
+    canvas.height = canvasH;
+    const ctx = canvas.getContext('2d');
+
+    // 1. 전체 배경 (흰색)
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvasW, canvasH);
+
+    // 상단 테두리 포인트 장식선
+    ctx.fillStyle = '#2563eb';
+    ctx.fillRect(36 * scale, 24 * scale, 523.28 * scale, 3 * scale);
+
+    // 2. 문서 제목 (작성되는 문서 상단 중앙에 크게 표기)
+    ctx.fillStyle = '#0f172a';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = `bold ${Math.round(18.5 * scale)}px "Malgun Gothic", "Pretendard", "Apple SD Gothic Neo", sans-serif`;
+    const titleY = 52 * scale;
+    ctx.fillText(docTitle, canvasW / 2, titleY);
+
+    // 3. 부서 또는 담당자명 (제목 우측 아래에 제목보다 작은 글씨로 표기)
+    const deptY = 74 * scale;
+    if (docDept) {
+      ctx.fillStyle = '#475569';
+      ctx.textAlign = 'right';
+      ctx.font = `normal ${Math.round(10 * scale)}px "Malgun Gothic", "Pretendard", "Apple SD Gothic Neo", sans-serif`;
+      ctx.fillText(docDept, (595.28 - 36) * scale, deptY);
+    }
+
+    // 상단 제목/부서 구분선 (균일한 선 두께 및 색상)
+    const lineY = 85 * scale;
+    ctx.strokeStyle = '#475569';
+    ctx.lineWidth = 1 * scale;
+    ctx.beginPath();
+    ctx.moveTo(36 * scale, lineY);
+    ctx.lineTo((595.28 - 36) * scale, lineY);
+    ctx.stroke();
+
+    // 4. 2열 분할 계산
+    // "n명이면 왼쪽에 1번부터 세로로 n/2번까지, 오른쪽에 그 다음 번호부터 끝번호까지. 홀수면 왼쪽에 한 명 더 오게."
+    const totalN = signerList.length;
+    const leftCount = Math.ceil(totalN / 2); // 홀수면 왼쪽에 한 명 더 배치
+    const rightCount = totalN - leftCount;
+    const maxRows = Math.max(leftCount, 1);
+
+    const leftSigners = signerList.slice(0, leftCount);
+    const rightSigners = signerList.slice(leftCount);
+
+    // 5. 표 규격 및 위치 계산 (좌우 각각 최대 30명씩 A4 한 장에 완벽 수용되는 행 높이 설정)
+    const tableTop = 92 * scale;
+    const headerH = 22.5 * scale; // 헤더 높이: 22.5pt
+    const targetRowH = 22.8 * scale; // 각 행 높이: 22.8pt (좌우 각각 30행 수용 가능)
+
+    const colGap = 11.28 * scale; // 좌우 열 사이 여백
+    const totalContentW = 523.28 * scale;
+    const singleColW = (totalContentW - colGap) / 2; // 한 열 너비: 256pt
+
+    // 세부 열 너비: [연번 32pt], [성명 68pt], [서명란 156pt]
+    const seqW = 32 * scale;
+    const nameW = 68 * scale;
+    const signW = singleColW - seqW - nameW;
+
+    const positions = {};
+
+    // 표 테두리 스타일 일원화: 동일한 두께(1px) 및 색상(#475569)으로 균일화
+    const tableBorderColor = '#475569';
+    const tableBorderWidth = 1 * scale;
+
+    // 표 렌더링 헬퍼 함수
+    function drawColumnTable(startX, signersSubset, startSeqIndex) {
+      // 1) 헤더 행 그리기
+      ctx.fillStyle = '#f1f5f9';
+      ctx.fillRect(startX, tableTop, singleColW, headerH);
+      ctx.strokeStyle = tableBorderColor;
+      ctx.lineWidth = tableBorderWidth;
+      ctx.strokeRect(startX, tableTop, singleColW, headerH);
+
+      // 헤더 구분 세로선
+      ctx.beginPath();
+      ctx.moveTo(startX + seqW, tableTop);
+      ctx.lineTo(startX + seqW, tableTop + headerH);
+      ctx.moveTo(startX + seqW + nameW, tableTop);
+      ctx.lineTo(startX + seqW + nameW, tableTop + headerH);
+      ctx.stroke();
+
+      // 헤더 텍스트
+      ctx.fillStyle = '#0f172a';
+      ctx.font = `bold ${Math.round(10 * scale)}px "Malgun Gothic", "Pretendard", sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const headerTextY = tableTop + (headerH / 2);
+      ctx.fillText('연번', startX + (seqW / 2), headerTextY);
+      ctx.fillText('성명', startX + seqW + (nameW / 2), headerTextY);
+      ctx.fillText('서명 (날인)', startX + seqW + nameW + (signW / 2), headerTextY);
+
+      // 2) 데이터 행 그리기 (균일한 테두리 및 30명 수용 높이 적용)
+      for (let r = 0; r < maxRows; r++) {
+        const rowY = tableTop + headerH + (r * targetRowH);
+        const name = signersSubset[r] || '';
+        const seqNumber = startSeqIndex + r + 1;
+
+        // 행 테두리 사각형 (단일 색상 및 동일 두께로 균일화)
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(startX, rowY, singleColW, targetRowH);
+        ctx.strokeStyle = tableBorderColor;
+        ctx.lineWidth = tableBorderWidth;
+        ctx.strokeRect(startX, rowY, singleColW, targetRowH);
+
+        // 세로 구분선 (동일한 색상 및 두께)
+        ctx.beginPath();
+        ctx.moveTo(startX + seqW, rowY);
+        ctx.lineTo(startX + seqW, rowY + targetRowH);
+        ctx.moveTo(startX + seqW + nameW, rowY);
+        ctx.lineTo(startX + seqW + nameW, rowY + targetRowH);
+        ctx.stroke();
+
+        const rowTextY = rowY + (targetRowH / 2);
+
+        if (name) {
+          // 연번
+          ctx.fillStyle = '#475569';
+          ctx.font = `normal ${Math.round(9.5 * scale)}px "Malgun Gothic", sans-serif`;
+          ctx.textAlign = 'center';
+          ctx.fillText(String(seqNumber), startX + (seqW / 2), rowTextY);
+
+          // 성명
+          ctx.fillStyle = '#0f172a';
+          ctx.font = `bold ${Math.round(10.5 * scale)}px "Malgun Gothic", sans-serif`;
+          ctx.textAlign = 'center';
+          ctx.fillText(name, startX + seqW + (nameW / 2), rowTextY);
+
+          // 서명란 워터마크 안내
+          ctx.fillStyle = '#cbd5e1';
+          ctx.font = `normal ${Math.round(8.5 * scale)}px "Malgun Gothic", sans-serif`;
+          ctx.textAlign = 'center';
+          ctx.fillText('(인)', startX + seqW + nameW + (signW / 2), rowTextY);
+
+          // 서명 날인 좌표 계산 (PDF 포인트 좌표계: 좌하단 기준)
+          const signCanvasX = startX + seqW + nameW;
+          const signCanvasY = rowY;
+          const signCanvasW = signW;
+          const signCanvasH = targetRowH;
+
+          const pdfX = Math.round(signCanvasX / scale);
+          const pdfY = Math.round(841.89 - ((signCanvasY + signCanvasH) / scale));
+          const pdfW = Math.round(signCanvasW / scale);
+          const pdfH = Math.round(signCanvasH / scale);
+
+          positions[name] = {
+            page: 1,
+            x: pdfX,
+            y: pdfY,
+            width: pdfW,
+            height: pdfH
+          };
+        } else {
+          // 우측 열 빈 칸 처리 (사선 표시)
+          ctx.strokeStyle = '#cbd5e1';
+          ctx.lineWidth = 1 * scale;
+          ctx.beginPath();
+          ctx.moveTo(startX, rowY);
+          ctx.lineTo(startX + singleColW, rowY + targetRowH);
+          ctx.stroke();
+        }
+      }
+    }
+
+    // 좌측 열 그리기 (1번 ~ leftCount)
+    const leftStartX = 36 * scale;
+    drawColumnTable(leftStartX, leftSigners, 0);
+
+    // 우측 열 그리기 (leftCount + 1 ~ totalN)
+    const rightStartX = leftStartX + singleColW + colGap;
+    drawColumnTable(rightStartX, rightSigners, leftCount);
+
+    // 6. PDFLib 문서로 변환 (표 아래 문구는 완전 삭제됨)
+    state.autoFormPositions = positions;
+
+    const pngDataUrl = canvas.toDataURL('image/png');
+    const pdfDoc = await PDFDocument.create();
+    const page = pdfDoc.addPage([595.28, 841.89]);
+    const pngImage = await pdfDoc.embedPng(pngDataUrl);
+    page.drawImage(pngImage, {
+      x: 0,
+      y: 0,
+      width: 595.28,
+      height: 841.89
+    });
+
+    const pdfBytes = await pdfDoc.save();
+    return pdfBytes;
+  }
+
+  // ==========================================================================
+  // [2-2] 기본 표준 서약서 PDF 자동 생성 (하위 호환 및 기본 템플릿 대체)
   // ==========================================================================
   async function generateDefaultPdfTemplate() {
-    if (window.PDFLib) {
-      const { PDFDocument, rgb, StandardFonts } = window.PDFLib;
-      const pdfDoc = await PDFDocument.create();
-      const page = pdfDoc.addPage([595.28, 841.89]); // A4 표준 크기
-      const font = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-      const fontRegular = await pdfDoc.embedFont(StandardFonts.Helvetica);
-
-      // 상단 테두리 장식
-      page.drawRectangle({
-        x: 40,
-        y: 800,
-        width: 515,
-        height: 4,
-        color: rgb(0.14, 0.38, 0.92)
-      });
-
-      // 제목 및 안내 텍스트 (PDFLib 기본 영문 폰트 호환 및 깔끔한 양식 레이아웃)
-      page.drawText('STANDARD AGREEMENT & E-SIGNATURE FORM', {
-        x: 65,
-        y: 755,
-        size: 16,
-        font: font,
-        color: rgb(0.1, 0.1, 0.1)
-      });
-
-      page.drawText('[ Electronic Signature & Consent Form / Yewon System ]', {
-        x: 135,
-        y: 735,
-        size: 10,
-        font: fontRegular,
-        color: rgb(0.35, 0.35, 0.35)
-      });
-
-      // 문서 내용 가이드 박스
-      page.drawRectangle({
-        x: 40,
-        y: 260,
-        width: 515,
-        height: 440,
-        borderColor: rgb(0.8, 0.85, 0.9),
-        borderWidth: 1,
-        color: rgb(0.97, 0.98, 1.0)
-      });
-
-      const bodyLines = [
-        '1. Purpose: This document confirms the formal agreement and identity verification',
-        '   for educational and administrative procedures in the Yewon E-Sign System.',
-        '',
-        '2. Confidentiality & Data Protection:',
-        '   All electronic records, digital signatures, and personal identification data',
-        '   are securely stored, encrypted, and processed in accordance with privacy laws.',
-        '',
-        '3. Legal Validity of Electronic Signature:',
-        '   The electronic signature executed by the designated educator/signee carries',
-        '   the full legal force and binding agreement equal to a handwritten signature.',
-        '',
-        '4. Scope of Consent:',
-        '   By signing below, the undersigned educator confirms having reviewed the terms',
-        '   and unconditionally agrees to the official tasks and guidelines set forth.'
-      ];
-
-      let yPos = 660;
-      for (const line of bodyLines) {
-        page.drawText(line, {
-          x: 60,
-          y: yPos,
-          size: 10,
-          font: fontRegular,
-          color: rgb(0.2, 0.2, 0.2)
-        });
-        yPos -= 22;
-      }
-
-      // 날짜 및 서명란 가이드 영역
-      page.drawRectangle({
-        x: 40,
-        y: 90,
-        width: 515,
-        height: 140,
-        borderColor: rgb(0.75, 0.75, 0.75),
-        borderWidth: 1,
-        color: rgb(1, 1, 1)
-      });
-
-      page.drawText('Official Signee Verification & Signature Area', {
-        x: 60,
-        y: 205,
-        size: 11,
-        font: font,
-        color: rgb(0.1, 0.2, 0.5)
-      });
-
-      page.drawText('Signee Name:', {
-        x: 60,
-        y: 160,
-        size: 10,
-        font: font,
-        color: rgb(0.3, 0.3, 0.3)
-      });
-
-      page.drawText('Date of Signing:', {
-        x: 60,
-        y: 125,
-        size: 10,
-        font: font,
-        color: rgb(0.3, 0.3, 0.3)
-      });
-
-      const todayStr = new Date().toLocaleDateString('ko-KR');
-      page.drawText(todayStr, {
-        x: 160,
-        y: 125,
-        size: 10,
-        font: fontRegular,
-        color: rgb(0.1, 0.1, 0.1)
-      });
-
-      // 서명 박스 점선 가이드
-      page.drawRectangle({
-        x: 380,
-        y: 105,
-        width: 155,
-        height: 80,
-        borderColor: rgb(0.2, 0.45, 0.9),
-        borderWidth: 1.5,
-        color: rgb(0.97, 0.98, 1)
-      });
-
-      page.drawText('[ Signature / 서명란 ]', {
-        x: 410,
-        y: 112,
-        size: 8.5,
-        font: font,
-        color: rgb(0.3, 0.5, 0.9)
-      });
-
-      const pdfBytes = await pdfDoc.save();
-      return pdfBytes;
-    }
-    return null;
+    return await generateAutoTablePdf(
+      state.autoFormTitle || '2026학년도 교직원 보안 및 청렴 서약서',
+      state.autoFormDept || '교무기획부 / 담당자: 교사 홍길동',
+      state.signers
+    );
   }
 
   // ==========================================================================
@@ -464,10 +556,21 @@
 
     // Admin Screen
     adminViewSection: document.getElementById('adminViewSection'),
+    btnCreateNewDoc: document.getElementById('btnCreateNewDoc'),
+    docListContainer: document.getElementById('docListContainer'),
+    docCountBadge: document.getElementById('docCountBadge'),
     tabButtons: document.querySelectorAll('.tab-btn'),
     tabContents: document.querySelectorAll('.tab-content'),
 
     // Admin: [시작] Tab
+    btnModeAutoForm: document.getElementById('btnModeAutoForm'),
+    btnModeUploadPdf: document.getElementById('btnModeUploadPdf'),
+    sectionAutoForm: document.getElementById('sectionAutoForm'),
+    sectionUploadPdf: document.getElementById('sectionUploadPdf'),
+    autoFormTitle: document.getElementById('autoFormTitle'),
+    autoFormDept: document.getElementById('autoFormDept'),
+    btnGenerateAutoForm: document.getElementById('btnGenerateAutoForm'),
+
     pdfDropzone: document.getElementById('pdfDropzone'),
     pdfFileInput: document.getElementById('pdfFileInput'),
     currentFormName: document.getElementById('currentFormName'),
@@ -807,7 +910,24 @@
 
   // PDF 문서 내에서 로그인한 선생님 성명 위치 및 스프레드시트 셀 단위의 서명란 정밀 탐색 (한 셀 안 완벽 배치)
   async function findSignerNameCoordinates(pdfBytes, signerName) {
-    if (!window.pdfjsLib || !pdfBytes || !signerName) return null;
+    if (!signerName) return null;
+
+    // [우선순위 1] 자동 생성된 2열 표 양식인 경우 사전 계산된 완벽한 서명란 좌표 사용
+    if (state.autoFormPositions && state.autoFormPositions[signerName]) {
+      const pos = state.autoFormPositions[signerName];
+      console.log(`[예원전자서명] 자동 생성 양식 정밀 서명 좌표 적용: "${signerName}" ->`, pos);
+      return {
+        found: true,
+        page: pos.page || 1,
+        x: pos.x,
+        y: pos.y,
+        width: pos.width,
+        height: pos.height,
+        isAutoCell: true
+      };
+    }
+
+    if (!window.pdfjsLib || !pdfBytes) return null;
     try {
       // 1. PDF 표(스프레드시트 셀 테두리) 그리드 선 추출
       let grid = { vLines: [], hLines: [] };
@@ -1100,6 +1220,9 @@
     let templateBytes = state.pdfTemplate.bytes;
     if (!templateBytes) {
       templateBytes = await generateDefaultPdfTemplate();
+      if (templateBytes) {
+        state.pdfTemplate.bytes = templateBytes;
+      }
     }
 
     const pdfDoc = await PDFDocument.load(templateBytes.slice());
@@ -1168,6 +1291,9 @@
     let templateBytes = state.pdfTemplate.bytes;
     if (!templateBytes) {
       templateBytes = await generateDefaultPdfTemplate();
+      if (templateBytes) {
+        state.pdfTemplate.bytes = templateBytes;
+      }
     }
 
     const pdfDoc = await PDFDocument.load(templateBytes.slice());
@@ -1364,6 +1490,11 @@
     const teacherName = state.currentSignerName;
     const signatureDataUrl = getSignatureDataUrl();
 
+    if (!signatureDataUrl) {
+      showToast('⚠️ 유효한 서명 이미지를 가져오지 못했습니다. 다시 서명해 주세요.');
+      return;
+    }
+
     el.btnSubmitSign.disabled = true;
     el.btnSubmitSign.textContent = '⏳ 서명 처리 중...';
 
@@ -1384,19 +1515,24 @@
       state.cachedUnifiedPdfBytes = null; // 통합 문서 캐시 무효화
       await saveSignatureToDB(record);
 
-      // 사용자 완료 화면 전환
+      // 사용자 완료 화면 전환 및 성공 알림
       el.userSigningStep.style.display = 'none';
       el.userCompleteStep.style.display = 'block';
       el.completedTeacherName.textContent = teacherName;
-
-      // 관리자 실시간 테이블 자동 갱신
-      renderProgressTable();
-      renderCompleteTable();
-      updateCompleteTabUI();
-      updateDashboardStats();
-      refreshAdminAndUserPreview();
-
       showToast(`🎉 ${teacherName} 선생님의 서명이 성공적으로 제출되었습니다!`);
+
+      // 관리자 실시간 테이블 및 서류 목록 자동 갱신
+      try {
+        saveDocumentsList();
+        renderDocumentList();
+        renderProgressTable();
+        renderCompleteTable();
+        updateCompleteTabUI();
+        updateDashboardStats();
+        refreshAdminAndUserPreview();
+      } catch (uiErr) {
+        console.warn('관리자 화면 갱신 알림 (서명은 정상 제출 완료됨):', uiErr);
+      }
     } catch (err) {
       console.error('Signature submission error:', err);
       showToast('❌ 서명 제출 중 오류가 발생했습니다. 다시 시도해 주세요.');
@@ -1713,6 +1849,8 @@
 
       state.pdfTemplate.name = file.name;
       state.pdfTemplate.bytes = bytes;
+      state.isAutoFormMode = false;
+      state.autoFormPositions = {};
       el.currentFormName.textContent = file.name;
 
       // IndexedDB에 저장
@@ -1792,16 +1930,329 @@
     }
   }
 
+  // ==========================================================================
+  // [10-1] 자동 표 양식 생성 및 문서 반영
+  // ==========================================================================
+  async function applyAutoFormTemplate(showAlert = false) {
+    try {
+      const title = el.autoFormTitle && el.autoFormTitle.value.trim() 
+        ? el.autoFormTitle.value.trim() 
+        : (state.autoFormTitle || '2026학년도 교직원 보안 및 청렴 서약서');
+      const dept = el.autoFormDept && el.autoFormDept.value.trim()
+        ? el.autoFormDept.value.trim()
+        : (state.autoFormDept || '');
+
+      state.autoFormTitle = title;
+      state.autoFormDept = dept;
+      state.isAutoFormMode = true;
+
+      localStorage.setItem('yewon_auto_title', title);
+      localStorage.setItem('yewon_auto_dept', dept);
+
+      const autoPdfBytes = await generateAutoTablePdf(title, dept, state.signers);
+      if (autoPdfBytes) {
+        state.pdfTemplate.name = `${title}.pdf`;
+        state.pdfTemplate.bytes = autoPdfBytes;
+        state.cachedUnifiedPdfBytes = null; // 통합 문서 캐시 무효화
+
+        if (el.currentFormName) {
+          el.currentFormName.textContent = `${state.pdfTemplate.name} (2열 표 자동 생성본)`;
+        }
+
+        await saveFileToDB('activeTemplate', autoPdfBytes, state.pdfTemplate.name);
+        refreshAdminAndUserPreview();
+        saveDocumentsList();
+        renderDocumentList();
+
+        if (showAlert) {
+          showToast(`✨ "${title}" 2열 표 양식이 성공적으로 생성되어 적용되었습니다!`);
+        }
+      }
+    } catch (err) {
+      console.error('applyAutoFormTemplate error:', err);
+      if (showAlert) {
+        showToast('❌ 양식 자동 생성 중 오류가 발생했습니다.');
+      }
+    }
+  }
+
+  // ==========================================================================
+  // [10-2] 다중 서류 관리 (작성된 서류 목록, 새 문서 생성, 수정, 삭제)
+  // ==========================================================================
+
+  // 서류 목록 로컬 로드
+  function loadDocumentsList() {
+    try {
+      const raw = localStorage.getItem('yewon_docs_list');
+      if (raw) {
+        state.documents = JSON.parse(raw);
+      }
+    } catch (e) {
+      state.documents = [];
+    }
+
+    if (!Array.isArray(state.documents) || state.documents.length === 0) {
+      // 기존 단일 문서 데이터를 바탕으로 첫 번째 기본 문서 자동 생성
+      const defaultDoc = {
+        id: 'doc_' + Date.now(),
+        title: state.autoFormTitle || '2026학년도 교직원 보안 및 청렴 서약서',
+        dept: state.autoFormDept || '교무기획부 / 담당자: 교사 홍길동',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        signers: [...state.signers],
+        signatures: { ...state.signatures },
+        isAutoFormMode: true
+      };
+      state.documents = [defaultDoc];
+      saveDocumentsList();
+    }
+
+    if (!state.currentDocId || !state.documents.some(d => d.id === state.currentDocId)) {
+      state.currentDocId = state.documents[0].id;
+    }
+  }
+
+  // 현재 서류 목록 저장
+  function saveDocumentsList() {
+    try {
+      // 현재 활성 문서의 실시간 상태 동기화
+      const currentDoc = state.documents.find(d => d.id === state.currentDocId);
+      if (currentDoc) {
+        currentDoc.title = state.autoFormTitle || currentDoc.title;
+        currentDoc.dept = state.autoFormDept !== undefined ? state.autoFormDept : currentDoc.dept;
+        currentDoc.signers = [...state.signers];
+        currentDoc.signatures = { ...state.signatures };
+        currentDoc.isAutoFormMode = state.isAutoFormMode;
+        currentDoc.updatedAt = new Date().toISOString();
+      }
+
+      // 메타데이터 리스트 로컬스토리지 저장
+      const metaList = state.documents.map(d => ({
+        id: d.id,
+        title: d.title,
+        dept: d.dept,
+        createdAt: d.createdAt,
+        updatedAt: d.updatedAt,
+        signers: d.signers || [],
+        signatures: d.signatures || {},
+        isAutoFormMode: d.isAutoFormMode !== false
+      }));
+      localStorage.setItem('yewon_docs_list', JSON.stringify(metaList));
+    } catch (e) {
+      console.warn('saveDocumentsList error:', e);
+    }
+  }
+
+  // 작성된 서류 목록 렌더링 (3개 초과 시 스크롤 처리)
+  function renderDocumentList() {
+    if (!el.docListContainer) return;
+    el.docListContainer.innerHTML = '';
+    if (el.docCountBadge) el.docCountBadge.textContent = `${state.documents.length}건`;
+
+    if (state.documents.length === 0) {
+      el.docListContainer.innerHTML = '<div style="padding: 1.25rem; text-align: center; color: #94a3b8; font-size: 0.9rem;">작성된 서류가 없습니다. 상단 [➕ 새 문서 만들기]를 눌러 새 서류를 작성해 보세요.</div>';
+      return;
+    }
+
+    state.documents.forEach(doc => {
+      const isActive = doc.id === state.currentDocId;
+      const total = doc.signers ? doc.signers.length : 0;
+      const completed = doc.signatures ? Object.keys(doc.signatures).length : 0;
+      const isCompleted = total > 0 && completed >= total;
+      const isPending = completed === 0;
+
+      const item = document.createElement('div');
+      item.className = `doc-item ${isActive ? 'active' : ''}`;
+      item.style.cssText = `
+        border: 1.5px solid ${isActive ? '#2563eb' : '#e2e8f0'};
+        background: ${isActive ? '#eff6ff' : '#ffffff'};
+        border-radius: var(--radius-md);
+        padding: 0.75rem 1rem;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        transition: all 0.15s ease;
+      `;
+
+      let statusBadge = '';
+      if (isCompleted) {
+        statusBadge = `<span class="badge badge-success" style="font-size: 0.75rem; padding: 0.2rem 0.5rem;">✓ 서명 완료 (${completed}/${total}명)</span>`;
+      } else if (isPending) {
+        statusBadge = `<span class="badge badge-pending" style="font-size: 0.75rem; padding: 0.2rem 0.5rem;">대기 중 (0/${total}명)</span>`;
+      } else {
+        statusBadge = `<span class="badge" style="background: #e0f2fe; color: #0369a1; border: 1px solid #bae6fd; font-size: 0.75rem; padding: 0.2rem 0.5rem;">⏳ 진행 중 (${completed}/${total}명)</span>`;
+      }
+
+      const updatedDate = doc.updatedAt ? new Date(doc.updatedAt).toLocaleDateString('ko-KR') : '';
+
+      item.innerHTML = `
+        <div style="flex: 1; min-width: 0; cursor: pointer;" class="doc-item-click-area" data-id="${doc.id}">
+          <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.25rem;">
+            <strong style="font-size: 0.95rem; color: #0f172a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 320px;">
+              ${doc.title || '제목 없는 문서'}
+            </strong>
+            ${statusBadge}
+            ${isActive ? '<span style="font-size: 0.7rem; background: #2563eb; color: white; padding: 0.15rem 0.4rem; border-radius: 4px; font-weight: 700;">작업 중</span>' : ''}
+          </div>
+          <div style="font-size: 0.8rem; color: #64748b; display: flex; gap: 0.75rem; flex-wrap: wrap;">
+            <span>🏢 ${doc.dept || '(부서/담당자 미지정)'}</span>
+            <span>📅 ${updatedDate}</span>
+          </div>
+        </div>
+        <div style="display: flex; gap: 0.4rem; flex-shrink: 0;">
+          <button type="button" class="nav-link-btn primary btn-edit-doc" data-id="${doc.id}" style="font-size: 0.8rem; padding: 0.35rem 0.7rem; font-weight: 700;">
+            ✏️ 수정
+          </button>
+          <button type="button" class="nav-link-btn danger btn-delete-doc" data-id="${doc.id}" style="font-size: 0.8rem; padding: 0.35rem 0.7rem;">
+            🗑️ 삭제
+          </button>
+        </div>
+      `;
+      el.docListContainer.appendChild(item);
+    });
+
+    // [수정] 버튼 및 카드 클릭 이벤트 바인딩
+    el.docListContainer.querySelectorAll('.btn-edit-doc, .doc-item-click-area').forEach(element => {
+      element.addEventListener('click', (e) => {
+        const id = element.getAttribute('data-id') || element.closest('.doc-item').querySelector('.btn-edit-doc').getAttribute('data-id');
+        switchToDocument(id);
+        const startTabBtn = document.querySelector('.tab-btn[data-tab="tab-start"]');
+        if (startTabBtn) startTabBtn.click();
+      });
+    });
+
+    // [삭제] 버튼 이벤트 바인딩
+    el.docListContainer.querySelectorAll('.btn-delete-doc').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const id = btn.getAttribute('data-id');
+        const doc = state.documents.find(d => d.id === id);
+        const title = doc ? doc.title : '선택한 서류';
+        if (confirm(`"${title}" 서류를 삭제하시겠습니까?\n(등록된 대상자 및 서명 데이터도 함께 삭제됩니다)`)) {
+          deleteDocument(id);
+        }
+      });
+    });
+  }
+
+  // 새 문서 만들기 (상단 [새 문서 만들기] 클릭 시)
+  async function createNewDocument() {
+    saveDocumentsList(); // 기존 작업 저장
+
+    const newDocId = 'doc_' + Date.now();
+    const now = new Date();
+    const defaultTitle = `${now.getFullYear()}학년도 신규 서약서 명부`;
+    const defaultDept = '교무행정부';
+
+    const newDoc = {
+      id: newDocId,
+      title: defaultTitle,
+      dept: defaultDept,
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+      signers: ['홍길동', '김영희', '이철수', '박민수', '정수진'],
+      signatures: {},
+      isAutoFormMode: true
+    };
+
+    state.documents.unshift(newDoc); // 목록 최상단에 추가
+    saveDocumentsList();
+    await switchToDocument(newDocId);
+
+    // [시작] 탭으로 전환
+    const startTabBtn = document.querySelector('.tab-btn[data-tab="tab-start"]');
+    if (startTabBtn) startTabBtn.click();
+
+    // 제목 입력란 포커스
+    if (el.autoFormTitle) {
+      el.autoFormTitle.focus();
+      el.autoFormTitle.select();
+    }
+
+    showToast('✨ 새 서류가 생성되었습니다. 제목과 명단을 작성해 주세요.');
+  }
+
+  // 특정 서류로 작업 전환
+  async function switchToDocument(docId) {
+    saveDocumentsList(); // 이전 문서 저장
+
+    const doc = state.documents.find(d => d.id === docId);
+    if (!doc) return;
+
+    state.currentDocId = docId;
+    state.autoFormTitle = doc.title || '';
+    state.autoFormDept = doc.dept || '';
+    state.signers = Array.isArray(doc.signers) ? [...doc.signers] : [];
+    state.signatures = doc.signatures ? { ...doc.signatures } : {};
+    state.isAutoFormMode = doc.isAutoFormMode !== false;
+    state.cachedUnifiedPdfBytes = null;
+
+    localStorage.setItem('yewon_auto_title', state.autoFormTitle);
+    localStorage.setItem('yewon_auto_dept', state.autoFormDept);
+    localStorage.setItem('yewon_signers', JSON.stringify(state.signers));
+
+    // UI 입력창 반영
+    if (el.autoFormTitle) el.autoFormTitle.value = state.autoFormTitle;
+    if (el.autoFormDept) el.autoFormDept.value = state.autoFormDept;
+
+    // 모드 뷰 전환
+    if (state.isAutoFormMode) {
+      if (el.btnModeAutoForm) el.btnModeAutoForm.classList.add('primary');
+      if (el.btnModeUploadPdf) el.btnModeUploadPdf.classList.remove('primary');
+      if (el.sectionAutoForm) el.sectionAutoForm.style.display = 'block';
+      if (el.sectionUploadPdf) el.sectionUploadPdf.style.display = 'none';
+
+      // 2열 표 양식 자동 생성 및 바인딩
+      const autoBytes = await generateAutoTablePdf(state.autoFormTitle, state.autoFormDept, state.signers);
+      state.pdfTemplate.name = `${state.autoFormTitle}.pdf`;
+      state.pdfTemplate.bytes = autoBytes;
+    } else {
+      if (el.btnModeUploadPdf) el.btnModeUploadPdf.classList.add('primary');
+      if (el.btnModeAutoForm) el.btnModeAutoForm.classList.remove('primary');
+      if (el.sectionAutoForm) el.sectionAutoForm.style.display = 'none';
+      if (el.sectionUploadPdf) el.sectionUploadPdf.style.display = 'block';
+    }
+
+    if (el.currentFormName) {
+      el.currentFormName.textContent = state.pdfTemplate.name;
+    }
+
+    renderDocumentList();
+    renderSignerTags();
+    renderProgressTable();
+    renderCompleteTable();
+    updateDashboardStats();
+    updateCompleteTabUI();
+    refreshAdminAndUserPreview();
+  }
+
+  // 서류 삭제
+  async function deleteDocument(docId) {
+    const idx = state.documents.findIndex(d => d.id === docId);
+    if (idx === -1) return;
+
+    state.documents.splice(idx, 1);
+
+    if (state.documents.length === 0) {
+      // 모두 삭제된 경우 새 기본 문서 생성
+      await createNewDocument();
+    } else {
+      if (state.currentDocId === docId) {
+        // 현재 활성 문서를 삭제한 경우 첫 번째 문서로 전환
+        await switchToDocument(state.documents[0].id);
+      } else {
+        saveDocumentsList();
+        renderDocumentList();
+      }
+    }
+    showToast('🗑️ 서류가 삭제되었습니다.');
+  }
+
   // 기본 양식으로 복원
   async function handleResetToDefaultForm() {
-    if (!confirm('기본 표준 서약서 양식으로 복원하시겠습니까?')) return;
-    const defaultBytes = await generateDefaultPdfTemplate();
-    state.pdfTemplate.name = '기본 표준 서약서 양식.pdf';
-    state.pdfTemplate.bytes = defaultBytes;
-    el.currentFormName.textContent = state.pdfTemplate.name;
-    await saveFileToDB('activeTemplate', defaultBytes, state.pdfTemplate.name);
-    showToast('기본 서약서 양식으로 복원되었습니다.');
-    refreshAdminAndUserPreview();
+    if (!confirm('기본 표준 표 양식(제목 및 명단 기반)으로 복원하시겠습니까?')) return;
+    await applyAutoFormTemplate(true);
   }
 
   // 등록된 선생님 대상자 태그 렌더링
@@ -1833,6 +2284,13 @@
         renderSignerTags();
         renderProgressTable();
         updateDashboardStats();
+        // 자동 양식 모드일 경우 명단 변경에 맞춰 실시간으로 표 양식 갱신
+        if (state.isAutoFormMode) {
+          applyAutoFormTemplate(false);
+        } else {
+          saveDocumentsList();
+          renderDocumentList();
+        }
       });
     });
   }
@@ -1865,6 +2323,14 @@
       updateDashboardStats();
       el.newSignerInput.value = '';
       showToast(`${addedCount}명의 선생님이 등록되었습니다.`);
+
+      // 자동 양식 모드일 경우 명단 추가에 맞춰 2열 표 양식 자동 재계산 및 갱신
+      if (state.isAutoFormMode) {
+        applyAutoFormTemplate(false);
+      } else {
+        saveDocumentsList();
+        renderDocumentList();
+      }
     } else {
       showToast('이미 등록되어 있거나 유효하지 않은 이름입니다.');
     }
@@ -1879,6 +2345,12 @@
       renderProgressTable();
       updateDashboardStats();
       showToast('대상자 명단이 비워졌습니다.');
+      if (state.isAutoFormMode) {
+        applyAutoFormTemplate(false);
+      } else {
+        saveDocumentsList();
+        renderDocumentList();
+      }
     }
   }
 
@@ -2369,7 +2841,51 @@
       btn.addEventListener('click', () => handleTabClick(btn));
     });
 
-    // 관리자: [시작] 메뉴
+    // 상단 [새 문서 만들기] 버튼
+    if (el.btnCreateNewDoc) {
+      el.btnCreateNewDoc.addEventListener('click', createNewDocument);
+    }
+
+    // 관리자: [시작] 메뉴 - 양식 모드 전환 (1. 자동 표 생성 / 2. PDF 직접 업로드)
+    if (el.btnModeAutoForm && el.btnModeUploadPdf) {
+      el.btnModeAutoForm.addEventListener('click', () => {
+        el.btnModeAutoForm.classList.add('primary');
+        el.btnModeUploadPdf.classList.remove('primary');
+        if (el.sectionAutoForm) el.sectionAutoForm.style.display = 'block';
+        if (el.sectionUploadPdf) el.sectionUploadPdf.style.display = 'none';
+        state.isAutoFormMode = true;
+        applyAutoFormTemplate(false);
+      });
+
+      el.btnModeUploadPdf.addEventListener('click', () => {
+        el.btnModeUploadPdf.classList.add('primary');
+        el.btnModeAutoForm.classList.remove('primary');
+        if (el.sectionAutoForm) el.sectionAutoForm.style.display = 'none';
+        if (el.sectionUploadPdf) el.sectionUploadPdf.style.display = 'block';
+        state.isAutoFormMode = false;
+      });
+    }
+
+    // 양식 자동 생성 버튼 및 입력창 이벤트
+    if (el.btnGenerateAutoForm) {
+      el.btnGenerateAutoForm.addEventListener('click', () => applyAutoFormTemplate(true));
+    }
+    if (el.autoFormTitle) {
+      el.autoFormTitle.value = state.autoFormTitle || '2026학년도 교직원 보안 및 청렴 서약서';
+      el.autoFormTitle.addEventListener('change', () => applyAutoFormTemplate(false));
+      el.autoFormTitle.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') applyAutoFormTemplate(true);
+      });
+    }
+    if (el.autoFormDept) {
+      el.autoFormDept.value = state.autoFormDept || '교무기획부 / 담당자: 교사 홍길동';
+      el.autoFormDept.addEventListener('change', () => applyAutoFormTemplate(false));
+      el.autoFormDept.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') applyAutoFormTemplate(true);
+      });
+    }
+
+    // 관리자: [시작] 메뉴 - 드롭존 및 버튼
     if (el.pdfDropzone && el.pdfFileInput) {
       el.pdfDropzone.addEventListener('click', () => el.pdfFileInput.click());
       el.pdfFileInput.addEventListener('change', (e) => {
@@ -2555,6 +3071,8 @@
     // 1. 이벤트 리스너 즉시 바인딩 (UI 클릭 및 로그인이 절대 먹통되지 않도록 최우선 실행)
     setupEventListeners();
     loadLocalSettings();
+    loadDocumentsList();
+    renderDocumentList();
     renderSignerTags();
     renderProgressTable();
     renderCompleteTable();
@@ -2581,13 +3099,21 @@
         state.pdfTemplate.name = savedTemplate.name || '등록된 양식.pdf';
         state.pdfTemplate.bytes = savedTemplate.data;
         if (el.currentFormName) el.currentFormName.textContent = state.pdfTemplate.name;
+
+        // 자동 양식인 경우 사전 좌표 계산 복원
+        if (state.pdfTemplate.name.includes('자동 생성') || state.pdfTemplate.name.includes('서약서')) {
+          state.isAutoFormMode = true;
+          await generateAutoTablePdf(state.autoFormTitle, state.autoFormDept, state.signers);
+        } else {
+          state.isAutoFormMode = false;
+        }
       } else {
-        // 기본 템플릿 생성
+        // 기본 표 양식 자동 생성 (2열 표 구조)
         const defaultBytes = await generateDefaultPdfTemplate();
         if (defaultBytes) {
-          state.pdfTemplate.name = '기본 표준 서약서 양식 (내장 템플릿).pdf';
+          state.pdfTemplate.name = `${state.autoFormTitle || '2026학년도 교직원 보안 및 청렴 서약서'}.pdf`;
           state.pdfTemplate.bytes = defaultBytes;
-          if (el.currentFormName) el.currentFormName.textContent = state.pdfTemplate.name;
+          if (el.currentFormName) el.currentFormName.textContent = `${state.pdfTemplate.name} (2열 표 자동 생성본)`;
           await saveFileToDB('activeTemplate', defaultBytes, state.pdfTemplate.name);
         }
       }
@@ -2603,6 +3129,7 @@
       updateCompleteTabUI();
       updateDashboardStats();
       refreshAdminAndUserPreview();
+      renderDocumentList();
     } catch (dbErr) {
       console.warn('Bootstrap background storage load skipped:', dbErr);
     }

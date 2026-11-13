@@ -941,3 +941,32 @@ body {
   transform: translateY(-1px);
 }
 
+/* Document List Scrollable & Items */
+.doc-list-scrollable::-webkit-scrollbar {
+  width: 6px;
+}
+.doc-list-scrollable::-webkit-scrollbar-track {
+  background: #f1f5f9;
+  border-radius: 4px;
+}
+.doc-list-scrollable::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+.doc-list-scrollable::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+.tab-btn-create:hover {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+}
+.tab-btn-create:active {
+  transform: translateY(1px);
+}
+
+.doc-item:hover {
+  border-color: #93c5fd !important;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.05);
+}
+
