@@ -704,13 +704,120 @@
   }
 
   // ==========================================================================
-  // [6] PDF 렌더링 헬퍼 & 성명 옆칸 자동 좌표 탐색 (PDF.js 활용)
+  // [6] PDF 표(스프레드시트 셀 그리드) 정밀 분석 & 성명 옆칸 자동 날인 좌표 계산
   // ==========================================================================
-  
-  // PDF 문서 내에서 로그인한 선생님 성명 위치 및 바로 옆칸 좌표 정밀 탐색 (칸 중앙 정렬)
+
+  // PDF 문서 내부의 표 선(스프레드시트 셀 테두리) 좌표를 분석하여 세로열(V) 및 가로행(H) 경계선 추출
+  async function extractPdfTableGrid(pdfBytes) {
+    if (!pdfBytes) return { vLines: [], hLines: [] };
+    try {
+      const vSet = new Set();
+      const hSet = new Set();
+      const bytes = (pdfBytes instanceof Uint8Array) ? pdfBytes : new Uint8Array(pdfBytes);
+      const latinStr = new TextDecoder('latin1').decode(bytes);
+
+      // stream ... endstream 블록 검색
+      const streamRegex = /stream[\r\n]+([\s\S]*?)[\r\n]+endstream/g;
+      let match;
+
+      while ((match = streamRegex.exec(latinStr)) !== null) {
+        const streamStart = match.index + match[0].indexOf('\n') + 1;
+        const streamEnd = match.index + match[0].lastIndexOf('endstream');
+        if (streamEnd <= streamStart) continue;
+
+        const streamBytes = bytes.subarray(streamStart, streamEnd);
+        let decodedText = '';
+
+        if (streamBytes.length > 2 && streamBytes[0] === 0x78 && window.DecompressionStream) {
+          try {
+            const rawBytes = streamBytes.subarray(2); // 2바이트 zlib 헤더 제외
+            const ds = new DecompressionStream('deflate-raw');
+            const writer = ds.writable.getWriter();
+            writer.write(rawBytes);
+            writer.close();
+            const reader = ds.readable.getReader();
+            const chunks = [];
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              chunks.push(value);
+            }
+            let total = 0;
+            for (const c of chunks) total += c.length;
+            const merged = new Uint8Array(total);
+            let off = 0;
+            for (const c of chunks) {
+              merged.set(c, off);
+              off += c.length;
+            }
+            decodedText = new TextDecoder('latin1').decode(merged);
+          } catch (e) {
+            decodedText = new TextDecoder('latin1').decode(streamBytes);
+          }
+        } else {
+          decodedText = new TextDecoder('latin1').decode(streamBytes);
+        }
+
+        if (!decodedText) continue;
+
+        // 1. 선 그리기 명령 파싱: x1 y1 m x2 y2 l
+        const lineRegex = /([-\d.]+)\s+([-\d.]+)\s+m\s+([-\d.]+)\s+([-\d.]+)\s+l/g;
+        let lm;
+        while ((lm = lineRegex.exec(decodedText)) !== null) {
+          const x1 = parseFloat(lm[1]);
+          const y1 = parseFloat(lm[2]);
+          const x2 = parseFloat(lm[3]);
+          const y2 = parseFloat(lm[4]);
+
+          // 수직선 (X 좌표 일치, 길이 8pt 이상) -> 열(Column) 셀 테두리 경계
+          if (Math.abs(x1 - x2) < 0.8 && Math.abs(y1 - y2) > 8) {
+            vSet.add(Math.round(x1 * 10) / 10);
+          }
+          // 수평선 (Y 좌표 일치, 길이 8pt 이상) -> 행(Row) 셀 테두리 경계
+          if (Math.abs(y1 - y2) < 0.8 && Math.abs(x1 - x2) > 8) {
+            hSet.add(Math.round(y1 * 10) / 10);
+          }
+        }
+
+        // 2. 사각형 그리기 명령 파싱: x y w h re
+        const reRegex = /([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+re/g;
+        let rm;
+        while ((rm = reRegex.exec(decodedText)) !== null) {
+          const rx = parseFloat(rm[1]);
+          const ry = parseFloat(rm[2]);
+          const rw = parseFloat(rm[3]);
+          const rh = parseFloat(rm[4]);
+          if (rw > 8 && rh > 8) {
+            vSet.add(Math.round(rx * 10) / 10);
+            vSet.add(Math.round((rx + rw) * 10) / 10);
+            hSet.add(Math.round(ry * 10) / 10);
+            hSet.add(Math.round((ry + rh) * 10) / 10);
+          }
+        }
+      }
+
+      const vLines = Array.from(vSet).sort((a, b) => a - b);
+      const hLines = Array.from(hSet).sort((a, b) => a - b);
+      return { vLines, hLines };
+    } catch (err) {
+      console.warn('extractPdfTableGrid error:', err);
+      return { vLines: [], hLines: [] };
+    }
+  }
+
+  // PDF 문서 내에서 로그인한 선생님 성명 위치 및 스프레드시트 셀 단위의 서명란 정밀 탐색 (한 셀 안 완벽 배치)
   async function findSignerNameCoordinates(pdfBytes, signerName) {
     if (!window.pdfjsLib || !pdfBytes || !signerName) return null;
     try {
+      // 1. PDF 표(스프레드시트 셀 테두리) 그리드 선 추출
+      let grid = { vLines: [], hLines: [] };
+      try {
+        grid = await extractPdfTableGrid(pdfBytes);
+      } catch (gridErr) {
+        console.warn('Grid extraction error:', gridErr);
+      }
+      const hasGrid = (grid.vLines && grid.vLines.length >= 2);
+
       const loadingTask = pdfjsLib.getDocument({ data: pdfBytes.slice() });
       const pdf = await loadingTask.promise;
       const cleanTargetName = signerName.replace(/\s+/g, '');
@@ -724,22 +831,7 @@
         const pageWidth = viewport.width;
         const pageHeight = viewport.height;
 
-        // 1. 해당 페이지 내에서 '서명', '날인', '확인', '(인)' 관련 열 헤더(Column Header) 탐색
-        let detectedSignHeader = null;
-        for (let j = 0; j < items.length; j++) {
-          const s = (items[j].str || '').replace(/\s+/g, '');
-          if (s === '서명' || s === '서명란' || s === '(서명)' || s === '날인' || s === '(인)' || s === '서명(인)' || s === '확인' || s.includes('서약자서명')) {
-            detectedSignHeader = {
-              x: items[j].transform[4],
-              y: items[j].transform[5],
-              width: items[j].width || 30,
-              centerX: items[j].transform[4] + ((items[j].width || 30) / 2)
-            };
-            break;
-          }
-        }
-
-        // 2. 성명 매칭 및 옆 칸 정중앙 좌표 계산
+        // 성명 매칭 및 옆 칸(서명 셀) 정중앙 좌표 계산
         for (let i = 0; i < items.length; i++) {
           const item = items[i];
           const cleanStr = (item.str || '').replace(/\s+/g, '');
@@ -750,14 +842,58 @@
             const itemWidth = item.width || (cleanStr.length * 12);
             const itemHeight = item.height || 14;
 
-            // 표준 양식 표 칸 규격에 알맞은 서명 크기 (가로 75pt, 세로 24pt)
-            let targetWidth = 75;
-            let targetHeight = 24;
+            // [방식 1: 스프레드시트 셀 그리드 기반 정밀 정렬] - 사용자가 요청한 "한 칸을 스프레드시트 한 셀로 인식"
+            if (hasGrid) {
+              // 1-1. 해당 성명이 속한 행(Row) 셀의 상단/하단 경계 찾기
+              const rowBottom = grid.hLines.filter(y => y <= (ty + 3)).pop();
+              const rowTop = grid.hLines.find(y => y > (ty - 3));
+              const rowH = (rowTop !== undefined && rowBottom !== undefined) ? (rowTop - rowBottom) : (itemHeight + 14);
+              const rowCenterY = (rowTop !== undefined && rowBottom !== undefined) ? ((rowBottom + rowTop) / 2) : (ty + itemHeight * 0.35);
 
-            // 행(Row)의 수직 정중앙 Y 좌표 (한글 폰트 베이스라인 ty 기준, 광학적 중심은 ty + itemHeight*0.35)
+              // 1-2. 해당 성명이 속한 열(Name Column)의 좌/우 경계 찾기
+              const colLeft = grid.vLines.filter(x => x <= (tx + 5)).pop();
+              const colRight = grid.vLines.find(x => x > tx);
+
+              if (colLeft !== undefined && colRight !== undefined) {
+                // 1-3. 서명란 셀(Signature Cell) = 성명 열 바로 우측의 인접한 셀!
+                const sigColLeft = colRight;
+                const nextColRight = grid.vLines.find(x => x > (colRight + 5));
+                const nameColWidth = colRight - colLeft;
+                const sigColRight = (nextColRight !== undefined) ? nextColRight : (sigColLeft + nameColWidth);
+                const sigColWidth = sigColRight - sigColLeft;
+
+                // 1-4. 서명 셀의 가로/세로 정중앙 좌표 계산
+                const cellCenterX = (sigColLeft + sigColRight) / 2;
+
+                // 1-5. 서명이 셀 테두리(선)에 절대 닿거나 넘어가지 않도록 안전 여백(상하좌우)을 둔 규격 결정
+                const targetWidth = Math.min(80, Math.max(50, sigColWidth - 14));
+                const targetHeight = Math.min(24, Math.max(16, rowH - 6));
+
+                const targetX = cellCenterX - (targetWidth / 2);
+                const targetY = rowCenterY - (targetHeight / 2);
+
+                console.log(`[스프레드시트 셀 인식] "${signerName}": 성명셀[${colLeft}~${colRight}] -> 서명셀[${sigColLeft}~${sigColRight}], 정중앙X=${cellCenterX}, 정중앙Y=${rowCenterY}`);
+
+                return {
+                  page: pageNum,
+                  x: Math.round(targetX),
+                  y: Math.round(targetY),
+                  width: Math.round(targetWidth),
+                  height: Math.round(targetHeight),
+                  cellCenterX: Math.round(cellCenterX),
+                  rowCenterY: Math.round(rowCenterY),
+                  found: true,
+                  isCellGrid: true
+                };
+              }
+            }
+
+            // [방식 2: 표 선이 없거나 텍스트 기반일 경우의 안전한 다음 셀 추정]
+            let targetWidth = 75;
+            let targetHeight = 22;
             const rowCenterY = ty + (itemHeight * 0.35);
 
-            // 동일 행(Y 좌표 차이 10pt 이내)에 있는 우측 텍스트 아이템들 수집
+            // 동일 행 우측 텍스트 탐색
             const sameRowRightItems = items.filter((it, idx) => {
               if (idx === i) return false;
               const yDiff = Math.abs(it.transform[5] - ty);
@@ -766,49 +902,26 @@
 
             let cellCenterX = null;
 
-            // Case A: 동일 행 바로 우측에 (인), (서명), 인, 서명 문구가 명시되어 있는 경우
+            // (인) 또는 (서명) 문구가 명시되어 있는 경우
             const signMarkerItem = sameRowRightItems.find(it => {
               const s = (it.str || '').replace(/\s+/g, '');
               return s.includes('(인)') || s.includes('(서명)') || s.includes('인') || s.includes('서명') || s.includes('도장');
             });
 
             if (signMarkerItem) {
-              // (인) 또는 (서명) 문구의 정중앙에 정렬
               cellCenterX = signMarkerItem.transform[4] + ((signMarkerItem.width || 18) / 2);
               targetWidth = 65;
-            } 
-            // Case B: 해당 텍스트 자체에 "(인)"이나 "(서명)"이 붙어있는 경우 (예: "홍길동(인)")
-            else if (cleanStr.endsWith('(인)') || cleanStr.endsWith('(서명)')) {
+            } else if (cleanStr.endsWith('(인)') || cleanStr.endsWith('(서명)')) {
               cellCenterX = (tx + itemWidth) - 15;
               targetWidth = 65;
-            }
-            // Case C: 동일 행 우측에 다른 열의 내용(예: "비고" 셀 등)이 있는 경우 -> 두 열 사이의 빈 칸 정중앙 계산
-            else if (sameRowRightItems.length > 0) {
-              const nextColItem = sameRowRightItems[0];
-              const cellLeft = tx + itemWidth;
-              const cellRight = nextColItem.transform[4];
-              const gap = cellRight - cellLeft;
-              if (gap > 20) {
-                cellCenterX = cellLeft + (gap / 2);
-                targetWidth = Math.min(80, Math.max(55, gap - 8));
-              }
+            } else {
+              // 일반 표에서 다음 셀의 중심은 성명 글자 끝이 아니라, 충분한 열 너비(최소 85pt)를 확보한 다음 셀 중앙으로 배치!
+              cellCenterX = tx + Math.max(85, itemWidth + 55);
             }
 
-            // Case D: 표 상단에 '서명' 열 헤더가 존재하고, 이름보다 우측에 위치한 경우 -> 서명 열 헤더의 X 중심과 일치
-            if (cellCenterX === null && detectedSignHeader && detectedSignHeader.y > ty && detectedSignHeader.x >= tx) {
-              cellCenterX = detectedSignHeader.centerX;
-            }
-
-            // Case E: 일반적인 테이블이나 서식에서 이름 우측 빈 칸 중심 추정 (기본 칸의 중심)
-            if (cellCenterX === null) {
-              cellCenterX = tx + itemWidth + 12 + (targetWidth / 2);
-            }
-
-            // 계산된 칸 중심을 기준으로 서명 박스 좌표 결정
             let targetX = cellCenterX - (targetWidth / 2);
             let targetY = rowCenterY - (targetHeight / 2);
 
-            // 페이지 경계 보정
             if (targetX + targetWidth > pageWidth - 10) {
               targetX = Math.max(10, pageWidth - targetWidth - 10);
             }
@@ -826,10 +939,7 @@
               found: true
             };
 
-            // (인) 표기가 포함된 경우 가장 확실한 서명 위치이므로 즉시 반환
-            if (signMarkerItem || cleanStr.includes('(인)') || cleanStr.includes('서명')) {
-              return bestMatch;
-            }
+            return bestMatch;
           }
         }
       }
