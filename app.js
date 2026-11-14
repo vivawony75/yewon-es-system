@@ -1086,20 +1086,54 @@
   // PDF 문서 내에서 로그인한 선생님 성명 위치 및 스프레드시트 셀 단위의 서명란 정밀 탐색 (한 셀 안 완벽 배치)
   async function findSignerNameCoordinates(pdfBytes, signerName) {
     if (!signerName) return null;
+    const cleanTargetName = signerName.replace(/\s+/g, '');
 
-    // [우선순위 1] 자동 생성된 2열 표 양식인 경우 사전 계산된 완벽한 서명란 좌표 사용
-    if (state.autoFormPositions && state.autoFormPositions[signerName]) {
-      const pos = state.autoFormPositions[signerName];
-      console.log(`[예원전자서명] 자동 생성 양식 정밀 서명 좌표 적용: "${signerName}" ->`, pos);
-      return {
-        found: true,
-        page: pos.page || 1,
-        x: pos.x,
-        y: pos.y,
-        width: pos.width,
-        height: pos.height,
-        isAutoCell: true
-      };
+    // [우선순위 1] 등록된 서명 대상자 명단 기반 2열 표 서명란 좌표 수학적 직접 계산 (각 선생님마다 고유 칸 배정, 절대 겹침 없음)
+    if (state.signers && state.signers.length > 0) {
+      const idx = state.signers.findIndex(s => s && s.replace(/\s+/g, '') === cleanTargetName);
+      if (idx !== -1) {
+        const totalN = state.signers.length;
+        const leftCount = Math.ceil(totalN / 2); // 홀수면 왼쪽에 1명 더 배치
+        const isLeft = idx < leftCount;
+        const rowIndex = isLeft ? idx : (idx - leftCount);
+
+        // A4 규격 (595.28 x 841.89 pt) 기반 2열 표 서명란 칸 위치
+        // 좌측 서명란 시작 X: 136pt, 우측 서명란 시작 X: 403.28pt
+        // 서명란 칸 너비: 156pt, 행 높이: 22.8pt
+        // Y좌표 (PDF 좌하단 기준): 704.59 - (rowIndex * 22.8)pt
+        const cellX = isLeft ? 136 : 403.28;
+        const cellY = 704.59 - (rowIndex * 22.8);
+        const cellW = 156;
+        const cellH = 22.8;
+
+        return {
+          found: true,
+          page: 1,
+          x: cellX,
+          y: cellY,
+          width: cellW,
+          height: cellH,
+          isAutoCell: true,
+          label: `${signerName} 선생님 서명란 (${idx + 1}번)`
+        };
+      }
+    }
+
+    // [우선순위 2] state.autoFormPositions 캐시에서 성명 매칭 (공백 정규화)
+    if (state.autoFormPositions) {
+      for (const [key, pos] of Object.entries(state.autoFormPositions)) {
+        if (key && key.replace(/\s+/g, '') === cleanTargetName && pos) {
+          return {
+            found: true,
+            page: pos.page || 1,
+            x: pos.x,
+            y: pos.y,
+            width: pos.width,
+            height: pos.height,
+            isAutoCell: true
+          };
+        }
+      }
     }
 
     if (!window.pdfjsLib || !pdfBytes) return null;
@@ -1383,63 +1417,34 @@
   }
 
   // ==========================================================================
-  // [7] 서명 합성 PDF 생성 (로그인한 이름 옆칸에 자동 날인)
+  // [7] 서명 날인 헬퍼 및 서명 합성 PDF 생성
   // ==========================================================================
-  async function generateSignedPdf(signerName, signatureDataUrl) {
-    if (!window.PDFLib) {
-      throw new Error('PDFLib 라이브러리를 사용할 수 없습니다.');
-    }
-    const { PDFDocument, rgb } = window.PDFLib;
 
-    // 양식 원본 바이트 로드
-    let templateBytes = state.pdfTemplate.bytes;
-    if (!templateBytes) {
-      templateBytes = await generateDefaultPdfTemplate();
-      if (templateBytes) {
-        state.pdfTemplate.bytes = templateBytes;
-      }
-    }
+  // 서명 이미지를 표 칸(Cell) 내부에 테두리 선을 절대 침범하지 않도록 안전 여백을 두고 정중앙에 날인
+  function drawSignatureIntoCell(targetPage, signatureImage, cellCoord) {
+    const posX = Number(cellCoord.x);
+    const posY = Number(cellCoord.y);
+    const posW = Number(cellCoord.width || 156);
+    const posH = Number(cellCoord.height || 22.8);
 
-    const pdfDoc = await PDFDocument.load(templateBytes.slice());
-    const signatureImage = await pdfDoc.embedPng(signatureDataUrl);
-
-    // 로그인한 선생님 성명의 위치를 PDF 텍스트에서 정밀 탐색 (성명 바로 옆칸)
-    const nameCoord = await findSignerNameCoordinates(templateBytes, signerName);
-
-    const pages = pdfDoc.getPages();
-    let targetPageNum;
-    let posX, posY, posW, posH;
-
-    if (nameCoord && nameCoord.found) {
-      targetPageNum = Math.min(Math.max(1, nameCoord.page), pages.length);
-      posX = nameCoord.x;
-      posY = nameCoord.y;
-      posW = nameCoord.width || 75;
-      posH = nameCoord.height || 24;
-      console.log(`[예원전자서명] "${signerName}" 선생님 이름 옆칸 위치에 자동 날인: ${targetPageNum}페이지 (X: ${posX}, Y: ${posY}, W: ${posW}, H: ${posH})`);
-    } else {
-      // 텍스트 미발견 시: 관리자 기본 설정 좌표 사용
-      targetPageNum = Math.min(Math.max(1, Number(state.sigPosition.page || 1)), pages.length);
-      posX = Number(state.sigPosition.x || 390);
-      posY = Number(state.sigPosition.y || 125);
-      posW = Number(state.sigPosition.width || 135);
-      posH = Number(state.sigPosition.height || 52);
-    }
-
-    const targetPage = pages[targetPageNum - 1];
-
-    // 서명 이미지가 칸을 벗어나지 않도록 종횡비 유지(fit: contain) 및 안전 내부 여백 적용
     const imgWidth = signatureImage.width;
     const imgHeight = signatureImage.height;
-    const safePad = 3; // 칸 테두리와 서명 사이의 3pt 안전 여백
-    const maxW = Math.max(10, posW - (safePad * 2));
-    const maxH = Math.max(10, posH - (safePad * 2));
 
+    // 테두리 선 침범 방지 여백 설정:
+    // 상하: 3.5pt 이상의 여백 (22.8pt 높이 칸에서 최대 높이를 15.5pt로 제한하여 상하 테두리선과 확실히 이격)
+    // 좌우: 8pt 이상의 여백 (156pt 너비 칸에서 최대 너비를 138pt로 제한하여 좌우 테두리선과 확실히 이격)
+    const padY = Math.max(3.5, posH * 0.16);
+    const padX = Math.max(8, posW * 0.08);
+
+    const maxW = Math.max(10, posW - (padX * 2));
+    const maxH = Math.max(8, posH - (padY * 2));
+
+    // 원본 종횡비 유지(fit: contain)하면서 칸 내부 최대 크기로 자동 스케일링
     const scale = Math.min(maxW / imgWidth, maxH / imgHeight, 1);
     const finalW = imgWidth * scale;
     const finalH = imgHeight * scale;
 
-    // 양식 칸 내부의 정중앙에 정렬하여 날인
+    // 칸 내부의 정중앙에 정확히 정렬 (상하좌우 테두리선과 완벽하게 분리되어 절대 선에 걸치지 않음)
     const finalX = posX + (posW - finalW) / 2;
     const finalY = posY + (posH - finalH) / 2;
 
@@ -1449,6 +1454,48 @@
       width: finalW,
       height: finalH
     });
+
+    return { finalX, finalY, finalW, finalH };
+  }
+
+  // 개인별 서명 합성 PDF 생성 (로그인한 이름 옆칸에 자동 날인)
+  async function generateSignedPdf(signerName, signatureDataUrl) {
+    if (!window.PDFLib) {
+      throw new Error('PDFLib 라이브러리를 사용할 수 없습니다.');
+    }
+    const { PDFDocument } = window.PDFLib;
+
+    // 자동 표 양식 모드인 경우 항상 깨끗한 최신 양식 원본 생성
+    let templateBytes;
+    if (state.isAutoFormMode) {
+      templateBytes = await generateAutoTablePdf(state.autoFormTitle, state.autoFormDept, state.signers);
+      state.pdfTemplate.bytes = templateBytes;
+    } else {
+      templateBytes = state.pdfTemplate.bytes;
+      if (!templateBytes) {
+        templateBytes = await generateDefaultPdfTemplate();
+        state.pdfTemplate.bytes = templateBytes;
+      }
+    }
+
+    const pdfDoc = await PDFDocument.load(templateBytes.slice());
+    const signatureImage = await pdfDoc.embedPng(signatureDataUrl);
+
+    // 로그인한 선생님 성명의 위치를 정밀 탐색 (성명 바로 옆칸)
+    const nameCoord = await findSignerNameCoordinates(templateBytes, signerName);
+    const pages = pdfDoc.getPages();
+
+    if (nameCoord && nameCoord.found) {
+      const targetPageNum = Math.min(Math.max(1, nameCoord.page), pages.length);
+      const targetPage = pages[targetPageNum - 1];
+      drawSignatureIntoCell(targetPage, signatureImage, nameCoord);
+      console.log(`[예원전자서명] "${signerName}" 선생님 이름 옆칸 위치에 정밀 날인: ${targetPageNum}페이지 (X: ${nameCoord.x}, Y: ${nameCoord.y}, W: ${nameCoord.width}, H: ${nameCoord.height})`);
+    } else {
+      // 텍스트 미발견 시: 관리자 기본 설정 좌표 사용
+      const targetPageNum = Math.min(Math.max(1, Number(state.sigPosition.page || 1)), pages.length);
+      const targetPage = pages[targetPageNum - 1];
+      drawSignatureIntoCell(targetPage, signatureImage, state.sigPosition);
+    }
 
     const signedBytes = await pdfDoc.save();
     return signedBytes;
@@ -1463,10 +1510,15 @@
     }
     const { PDFDocument } = window.PDFLib;
 
-    let templateBytes = state.pdfTemplate.bytes;
-    if (!templateBytes) {
-      templateBytes = await generateDefaultPdfTemplate();
-      if (templateBytes) {
+    // 항상 최신 명단과 서식으로 깨끗한 원본 양식을 준비
+    let templateBytes;
+    if (state.isAutoFormMode) {
+      templateBytes = await generateAutoTablePdf(state.autoFormTitle, state.autoFormDept, state.signers);
+      state.pdfTemplate.bytes = templateBytes;
+    } else {
+      templateBytes = state.pdfTemplate.bytes;
+      if (!templateBytes) {
+        templateBytes = await generateDefaultPdfTemplate();
         state.pdfTemplate.bytes = templateBytes;
       }
     }
@@ -1476,56 +1528,22 @@
 
     let signedCount = 0;
 
-    // 등록된 모든 대상자 중 서명이 제출된 사용자의 서명을 순회하여 날인
+    // 등록된 모든 대상자 중 서명이 제출된 사용자의 서명을 순회하여 각자의 고유 서명란에 날인
     for (const signerName of state.signers) {
       const record = state.signatures[signerName];
       if (record && record.signatureImage) {
         try {
           const signatureImage = await pdfDoc.embedPng(record.signatureImage);
-          const nameCoord = await findSignerNameCoordinates(templateBytes, signerName);
+          const cellCoord = await findSignerNameCoordinates(templateBytes, signerName);
 
-          let targetPageNum;
-          let posX, posY, posW, posH;
+          if (cellCoord && cellCoord.found) {
+            const targetPageNum = Math.min(Math.max(1, cellCoord.page), pages.length);
+            const targetPage = pages[targetPageNum - 1];
 
-          if (nameCoord && nameCoord.found) {
-            targetPageNum = Math.min(Math.max(1, nameCoord.page), pages.length);
-            posX = nameCoord.x;
-            posY = nameCoord.y;
-            posW = nameCoord.width || 75;
-            posH = nameCoord.height || 24;
-          } else {
-            targetPageNum = Math.min(Math.max(1, Number(state.sigPosition.page || 1)), pages.length);
-            posX = Number(state.sigPosition.x || 390);
-            posY = Number(state.sigPosition.y || 125);
-            posW = Number(state.sigPosition.width || 135);
-            posH = Number(state.sigPosition.height || 52);
+            // 테두리 선을 절대 침범하지 않도록 칸 내부 여백 유지하며 정중앙 날인
+            drawSignatureIntoCell(targetPage, signatureImage, cellCoord);
+            signedCount++;
           }
-
-          const targetPage = pages[targetPageNum - 1];
-
-          // 서명 이미지가 칸을 벗어나지 않도록 종횡비 유지(fit: contain) 및 안전 내부 여백 적용
-          const imgWidth = signatureImage.width;
-          const imgHeight = signatureImage.height;
-          const safePad = 2; // 칸 테두리와 서명 사이의 2pt 안전 여백
-          const maxW = Math.max(10, posW - (safePad * 2));
-          const maxH = Math.max(10, posH - (safePad * 2));
-
-          const scale = Math.min(maxW / imgWidth, maxH / imgHeight, 1);
-          const finalW = imgWidth * scale;
-          const finalH = imgHeight * scale;
-
-          // 양식 칸 내부의 정확한 정중앙에 배치
-          const finalX = posX + (posW - finalW) / 2;
-          const finalY = posY + (posH - finalH) / 2;
-
-          targetPage.drawImage(signatureImage, {
-            x: finalX,
-            y: finalY,
-            width: finalW,
-            height: finalH
-          });
-
-          signedCount++;
         } catch (err) {
           console.warn(`[예원전자서명] "${signerName}" 통합 서명 날인 실패:`, err);
         }
@@ -2797,7 +2815,8 @@
   async function handlePrintUnifiedPdf() {
     try {
       showToast('🖨️ 통합 서명 문서 인쇄 준비 중...');
-      const unifiedBytes = state.cachedUnifiedPdfBytes || await generateUnifiedPdf();
+      const unifiedBytes = await generateUnifiedPdf();
+      state.cachedUnifiedPdfBytes = unifiedBytes;
       printPdfBytes(unifiedBytes, `[통합서명완료]_${state.pdfTemplate.name || '서약서'}`);
     } catch (err) {
       console.error('Print unified PDF error:', err);
@@ -2808,7 +2827,9 @@
   // 1-2) 통합본 PDF 다운로드
   async function handleDownloadUnifiedPdf() {
     try {
-      const unifiedBytes = state.cachedUnifiedPdfBytes || await generateUnifiedPdf();
+      showToast('📥 통합 서명 문서 다운로드 준비 중...');
+      const unifiedBytes = await generateUnifiedPdf();
+      state.cachedUnifiedPdfBytes = unifiedBytes;
       const filename = `[통합서명완료]_모든사용자_${state.pdfTemplate.name || '서약서.pdf'}`;
       downloadPdfBytes(unifiedBytes, filename);
     } catch (err) {
@@ -2820,7 +2841,9 @@
   // 1-3) 통합본 전체화면 미리보기 모달
   async function handlePreviewUnifiedPdf() {
     try {
-      const unifiedBytes = state.cachedUnifiedPdfBytes || await generateUnifiedPdf();
+      showToast('👁️ 통합 서명 문서 미리보기 준비 중...');
+      const unifiedBytes = await generateUnifiedPdf();
+      state.cachedUnifiedPdfBytes = unifiedBytes;
       openPdfPreviewModal(`[통합 서명 완료본] ${state.pdfTemplate.name || '서약서'}`, unifiedBytes);
     } catch (err) {
       console.error('Preview unified PDF error:', err);
@@ -2873,34 +2896,37 @@
 
     // 개별 PDF 즉시 인쇄 이벤트
     el.completeTableBody.querySelectorAll('.btn-print-user-pdf').forEach(btn => {
-      btn.addEventListener('click', (e) => {
+      btn.addEventListener('click', async (e) => {
         const name = e.currentTarget.getAttribute('data-name');
         const record = state.signatures[name];
-        if (record && record.pdfBytes) {
-          printPdfBytes(record.pdfBytes, `[서명완료]_${name}_${state.pdfTemplate.name || '서약서'}`);
+        if (record) {
+          const pdfBytes = record.pdfBytes || await generateSignedPdf(name, record.signatureImage);
+          printPdfBytes(pdfBytes, `[서명완료]_${name}_${state.pdfTemplate.name || '서약서'}`);
         }
       });
     });
 
     // 개별 PDF 다운로드 이벤트
     el.completeTableBody.querySelectorAll('.btn-download-signed-pdf').forEach(btn => {
-      btn.addEventListener('click', (e) => {
+      btn.addEventListener('click', async (e) => {
         const name = e.currentTarget.getAttribute('data-name');
         const record = state.signatures[name];
-        if (record && record.pdfBytes) {
-          const filename = `[서명완료]_${name}_${state.pdfTemplate.name || '서약서'}`;
-          downloadPdfBytes(record.pdfBytes, filename);
+        if (record) {
+          const pdfBytes = record.pdfBytes || await generateSignedPdf(name, record.signatureImage);
+          const filename = `[서명완료]_${name}_${state.pdfTemplate.name || '서약서.pdf'}`;
+          downloadPdfBytes(pdfBytes, filename);
         }
       });
     });
 
     // 개별 PDF 미리보기 이벤트
     el.completeTableBody.querySelectorAll('.btn-preview-signed-pdf').forEach(btn => {
-      btn.addEventListener('click', (e) => {
+      btn.addEventListener('click', async (e) => {
         const name = e.currentTarget.getAttribute('data-name');
         const record = state.signatures[name];
-        if (record && record.pdfBytes) {
-          openPdfPreviewModal(`[서명완료] ${name} 선생님 서명 문서`, record.pdfBytes);
+        if (record) {
+          const pdfBytes = record.pdfBytes || await generateSignedPdf(name, record.signatureImage);
+          openPdfPreviewModal(`[서명완료] ${name} 선생님 서명 문서`, pdfBytes);
         }
       });
     });
@@ -2925,8 +2951,9 @@
 
       for (const name of completedSigners) {
         const record = state.signatures[name];
-        if (record && record.pdfBytes) {
-          const doc = await PDFDocument.load(record.pdfBytes.slice());
+        if (record) {
+          const pdfBytes = record.pdfBytes || await generateSignedPdf(name, record.signatureImage);
+          const doc = await PDFDocument.load(pdfBytes.slice());
           const copiedPages = await mergedPdf.copyPages(doc, doc.getPageIndices());
           copiedPages.forEach(page => mergedPdf.addPage(page));
         }
@@ -2960,13 +2987,14 @@
       const zip = new JSZip();
       const folder = zip.folder('예원전자서명_완료문서모음');
 
-      completedSigners.forEach(name => {
+      for (const name of completedSigners) {
         const record = state.signatures[name];
-        if (record && record.pdfBytes) {
-          const fileName = `[서명완료]_${name}_${state.pdfTemplate.name || '서약서'}`;
-          folder.file(fileName, record.pdfBytes);
+        if (record) {
+          const pdfBytes = record.pdfBytes || await generateSignedPdf(name, record.signatureImage);
+          const fileName = `[서명완료]_${name}_${state.pdfTemplate.name || '서약서.pdf'}`;
+          folder.file(fileName, pdfBytes);
         }
-      });
+      }
 
       const zipBlob = await zip.generateAsync({ type: 'blob' });
       const link = document.createElement('a');
