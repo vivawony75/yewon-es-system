@@ -96,9 +96,17 @@
   }
 
   // ==========================================================================
-  // [1-1] Firebase Firestore 클라우드 연동
+  // [1-1] Firebase 클라우드 실시간 연동 (Realtime Database + Firestore 듀얼 지원)
   // ==========================================================================
   let firestore = null;
+  let rtdb = null;
+  let isCloudSynced = false;
+
+  // Realtime Database 키 안전 변환 (특수문자 치환)
+  function toSafeRtdbKey(str) {
+    if (!str) return 'unknown';
+    return encodeURIComponent(String(str).trim()).replace(/[\.\$#\[\]\/]/g, '_');
+  }
 
   function initFirebase() {
     if (window.firebase && window.APP_CONFIG && window.APP_CONFIG.firebaseConfig) {
@@ -106,82 +114,224 @@
         if (!firebase.apps || !firebase.apps.length) {
           firebase.initializeApp(window.APP_CONFIG.firebaseConfig);
         }
-        firestore = firebase.firestore();
-        console.log('[예원전자서명] Firebase Firestore 연결 성공');
-        setupFirestoreRealtimeSync();
+        if (typeof firebase.database === 'function') {
+          rtdb = firebase.database();
+          console.log('[예원전자서명] Firebase Realtime Database 연결 성공');
+        }
+        if (typeof firebase.firestore === 'function') {
+          try {
+            firestore = firebase.firestore();
+            console.log('[예원전자서명] Firebase Firestore 인스턴스 준비');
+          } catch (fErr) {}
+        }
+        setupRealtimeCloudSync();
       } catch (err) {
         console.warn('[예원전자서명] Firebase 초기화 경고:', err);
       }
     }
   }
 
-  function setupFirestoreRealtimeSync() {
-    if (!firestore) return;
-    try {
-      // 1. signatures 컬렉션 실시간 구독 (여러 기기 실시간 동기화)
-      firestore.collection('signatures').onSnapshot((snapshot) => {
-        let changed = false;
-        snapshot.forEach((doc) => {
-          const data = doc.data();
-          if (data && data.name) {
-            let signedAtStr = data.signedAt;
-            if (data.signedAt && typeof data.signedAt.toDate === 'function') {
-              signedAtStr = data.signedAt.toDate().toISOString();
-            } else if (!signedAtStr) {
-              signedAtStr = new Date().toISOString();
-            }
-            if (!state.signatures[data.name] || state.signatures[data.name].signedAt !== signedAtStr) {
-              state.signatures[data.name] = {
-                name: data.name,
-                signedAt: signedAtStr,
-                signatureImage: data.signatureImage || '',
-                pdfUrl: data.pdfUrl || null,
-                pdfBlob: state.signatures[data.name]?.pdfBlob || null
-              };
+  function setupRealtimeCloudSync() {
+    // 1. Realtime Database 실시간 구독 (모든 기기 실시간 100% 동기화)
+    if (rtdb) {
+      try {
+        // (1) config/system 구독 (서명 대상자 명단, 양식 제목, 부서, 서명 위치)
+        rtdb.ref('config/system').on('value', (snapshot) => {
+          const cfg = snapshot.val();
+          if (cfg) {
+            let changed = false;
+            if (Array.isArray(cfg.signers) && cfg.signers.length > 0) {
+              state.signers = cfg.signers;
+              localStorage.setItem('yewon_signers', JSON.stringify(state.signers));
               changed = true;
             }
-          }
-        });
-        if (changed) {
-          if (typeof renderProgressTable === 'function') renderProgressTable();
-          if (typeof renderCompleteTable === 'function') renderCompleteTable();
-          if (typeof updateDashboardStats === 'function') updateDashboardStats();
-        }
-      }, (err) => {
-        console.warn('Firestore signatures 구독:', err);
-      });
+            if (cfg.autoFormTitle !== undefined && cfg.autoFormTitle !== null) {
+              state.autoFormTitle = cfg.autoFormTitle;
+              localStorage.setItem('yewon_auto_title', state.autoFormTitle);
+              if (el.autoFormTitle && document.activeElement !== el.autoFormTitle) {
+                el.autoFormTitle.value = state.autoFormTitle;
+              }
+              changed = true;
+            }
+            if (cfg.autoFormDept !== undefined && cfg.autoFormDept !== null) {
+              state.autoFormDept = cfg.autoFormDept;
+              localStorage.setItem('yewon_auto_dept', state.autoFormDept);
+              if (el.autoFormDept && document.activeElement !== el.autoFormDept) {
+                el.autoFormDept.value = state.autoFormDept;
+              }
+              changed = true;
+            }
+            if (cfg.sigPosition) {
+              state.sigPosition = { ...state.sigPosition, ...cfg.sigPosition };
+              localStorage.setItem('yewon_sig_position', JSON.stringify(state.sigPosition));
+              changed = true;
+            }
+            if (cfg.currentDocId && !state.currentDocId) {
+              state.currentDocId = cfg.currentDocId;
+            }
 
-      // 2. config 컬렉션 실시간 구독 (대상자 및 서명 좌표 공유)
-      firestore.collection('config').doc('system').onSnapshot((doc) => {
-        if (doc.exists) {
-          const cfg = doc.data();
+            isCloudSynced = true;
+
+            // 대기 중인 성명 검증 콜백이 있으면 즉시 실행
+            if (window._pendingNameCheck && typeof window._pendingNameCheck.check === 'function') {
+              window._pendingNameCheck.check();
+            }
+
+            // 사용자 화면에서 성명 입력 단계에 머물러 있는 경우 자동 재검증
+            if (el.userNameStep && el.userNameStep.style.display !== 'none') {
+              const currentInput = el.signerNameInput ? el.signerNameInput.value.trim() : '';
+              if (currentInput) {
+                const norm = currentInput.replace(/\s+/g, '');
+                if (state.signers.some(s => s.replace(/\s+/g, '') === norm)) {
+                  console.log('[예원전자서명] 클라우드 명단 수신 완료 -> 자동 로그인 진행');
+                  handleCheckSignerName();
+                }
+              }
+            }
+
+            if (changed) {
+              if (typeof renderSignerTags === 'function') renderSignerTags();
+              if (typeof renderProgressTable === 'function') renderProgressTable();
+              if (typeof renderCompleteTable === 'function') renderCompleteTable();
+              if (typeof updateDashboardStats === 'function') updateDashboardStats();
+              if (state.isAutoFormMode && typeof generateAutoTablePdf === 'function') {
+                generateAutoTablePdf(state.autoFormTitle, state.autoFormDept, state.signers)
+                  .then(bytes => {
+                    state.pdfTemplate.bytes = bytes;
+                    state.pdfTemplate.name = `${state.autoFormTitle || '서명문서'}.pdf`;
+                    refreshAdminAndUserPreview();
+                  }).catch(() => {});
+              }
+            }
+          }
+        }, (err) => {
+          console.warn('RTDB config 구독 오류:', err);
+        });
+
+        // (2) signatures 구독 (실시간 서명 현황 반영)
+        rtdb.ref('signatures').on('value', (snapshot) => {
+          const val = snapshot.val();
+          if (val && typeof val === 'object') {
+            let changed = false;
+            Object.keys(val).forEach(key => {
+              const rec = val[key];
+              if (rec && rec.name) {
+                const existing = state.signatures[rec.name];
+                if (!existing || existing.signedAt !== rec.signedAt) {
+                  state.signatures[rec.name] = {
+                    name: rec.name,
+                    signedAt: rec.signedAt || new Date().toISOString(),
+                    signatureImage: rec.signatureImage || '',
+                    pdfUrl: rec.pdfUrl || null,
+                    pdfBlob: existing?.pdfBlob || null
+                  };
+                  changed = true;
+                }
+              }
+            });
+            if (changed) {
+              if (typeof renderProgressTable === 'function') renderProgressTable();
+              if (typeof renderCompleteTable === 'function') renderCompleteTable();
+              if (typeof updateDashboardStats === 'function') updateDashboardStats();
+            }
+          }
+        }, (err) => {
+          console.warn('RTDB signatures 구독 오류:', err);
+        });
+
+        // (3) documents 구독 (다중 서류 목록 실시간 동기화)
+        rtdb.ref('documents').on('value', (snapshot) => {
+          const docsMap = snapshot.val();
+          if (docsMap && typeof docsMap === 'object') {
+            const docList = Array.isArray(docsMap) ? docsMap : Object.values(docsMap);
+            if (docList.length > 0) {
+              state.documents = docList;
+              localStorage.setItem('yewon_docs_list', JSON.stringify(docList));
+              if (typeof renderDocumentList === 'function') renderDocumentList();
+            }
+          }
+        }, (err) => {
+          console.warn('RTDB documents 구독 오류:', err);
+        });
+
+      } catch (rtdbErr) {
+        console.warn('RTDB setup error:', rtdbErr);
+      }
+    }
+
+    // 2. Firestore 구독 (백업)
+    if (firestore) {
+      try {
+        firestore.collection('signatures').onSnapshot((snapshot) => {
           let changed = false;
-          if (cfg.signers && Array.isArray(cfg.signers) && cfg.signers.length > 0) {
-            state.signers = cfg.signers;
-            localStorage.setItem('yewon_signers', JSON.stringify(state.signers));
-            changed = true;
-          }
-          if (cfg.sigPosition) {
-            state.sigPosition = { ...state.sigPosition, ...cfg.sigPosition };
-            localStorage.setItem('yewon_sig_position', JSON.stringify(state.sigPosition));
-            changed = true;
-          }
+          snapshot.forEach((doc) => {
+            const data = doc.data();
+            if (data && data.name) {
+              let signedAtStr = data.signedAt;
+              if (data.signedAt && typeof data.signedAt.toDate === 'function') {
+                signedAtStr = data.signedAt.toDate().toISOString();
+              } else if (!signedAtStr) {
+                signedAtStr = new Date().toISOString();
+              }
+              if (!state.signatures[data.name] || state.signatures[data.name].signedAt !== signedAtStr) {
+                state.signatures[data.name] = {
+                  name: data.name,
+                  signedAt: signedAtStr,
+                  signatureImage: data.signatureImage || '',
+                  pdfUrl: data.pdfUrl || null,
+                  pdfBlob: state.signatures[data.name]?.pdfBlob || null
+                };
+                changed = true;
+              }
+            }
+          });
           if (changed) {
-            if (typeof renderSignersEditor === 'function') renderSignersEditor();
             if (typeof renderProgressTable === 'function') renderProgressTable();
             if (typeof renderCompleteTable === 'function') renderCompleteTable();
             if (typeof updateDashboardStats === 'function') updateDashboardStats();
           }
-        }
-      }, (err) => {
-        console.warn('Firestore config 구독:', err);
-      });
-    } catch (e) {
-      console.warn('setupFirestoreRealtimeSync error:', e);
+        }, (err) => {});
+
+        firestore.collection('config').doc('system').onSnapshot((doc) => {
+          if (doc.exists) {
+            const cfg = doc.data();
+            if (cfg.signers && Array.isArray(cfg.signers) && cfg.signers.length > 0) {
+              state.signers = cfg.signers;
+              localStorage.setItem('yewon_signers', JSON.stringify(state.signers));
+            }
+            if (cfg.sigPosition) {
+              state.sigPosition = { ...state.sigPosition, ...cfg.sigPosition };
+              localStorage.setItem('yewon_sig_position', JSON.stringify(state.sigPosition));
+            }
+            if (typeof renderSignerTags === 'function') renderSignerTags();
+            if (typeof renderProgressTable === 'function') renderProgressTable();
+            if (typeof renderCompleteTable === 'function') renderCompleteTable();
+            if (typeof updateDashboardStats === 'function') updateDashboardStats();
+          }
+        }, (err) => {});
+      } catch (e) {}
     }
   }
 
   async function saveSignatureToDB(record) {
+    // 1. Firebase Realtime Database 저장 (실시간 클라우드 전송)
+    if (rtdb) {
+      try {
+        const safeKey = toSafeRtdbKey(record.name);
+        await rtdb.ref(`signatures/${safeKey}`).set({
+          name: record.name,
+          docId: state.currentDocId || '',
+          signedAt: record.signedAt || new Date().toISOString(),
+          signatureImage: record.signatureImage || '',
+          status: 'signed',
+          updatedAt: new Date().toISOString()
+        });
+      } catch (rErr) {
+        console.warn('RTDB 서명 저장 경고:', rErr);
+      }
+    }
+
+    // 2. Firestore 저장 (백업)
     if (firestore) {
       try {
         let tsDate = new Date();
@@ -198,10 +348,10 @@
           status: 'signed',
           updatedAt: firebase.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
-      } catch (fErr) {
-        console.warn('Firestore 서명 저장 실패 (IndexedDB 대체):', fErr);
-      }
+      } catch (fErr) {}
     }
+
+    // 3. IndexedDB 로컬 저장
     if (!db) return;
     return new Promise((resolve) => {
       try {
@@ -232,12 +382,16 @@
   }
 
   async function removeSignatureFromDB(name) {
+    if (rtdb) {
+      try {
+        const safeKey = toSafeRtdbKey(name);
+        await rtdb.ref(`signatures/${safeKey}`).remove();
+      } catch (rErr) {}
+    }
     if (firestore) {
       try {
         await firestore.collection('signatures').doc(name).delete();
-      } catch (fErr) {
-        console.warn('Firestore 서명 삭제 실패:', fErr);
-      }
+      } catch (fErr) {}
     }
     if (!db) return;
     return new Promise((resolve) => {
@@ -273,14 +427,33 @@
     try {
       localStorage.setItem('yewon_signers', JSON.stringify(state.signers));
       localStorage.setItem('yewon_sig_position', JSON.stringify(state.sigPosition));
+      localStorage.setItem('yewon_auto_title', state.autoFormTitle || '');
+      localStorage.setItem('yewon_auto_dept', state.autoFormDept || '');
+
+      // Realtime Database 실시간 클라우드 동기화 (모든 기기 실시간 전송)
+      if (rtdb) {
+        rtdb.ref('config/system').set({
+          signers: state.signers,
+          autoFormTitle: state.autoFormTitle || '',
+          autoFormDept: state.autoFormDept || '',
+          currentDocId: state.currentDocId || '',
+          sigPosition: state.sigPosition,
+          updatedAt: new Date().toISOString()
+        }).catch(err => console.warn('RTDB config 동기화 오류:', err));
+      }
+
+      // Firestore 동기화 (백업)
       if (firestore) {
         firestore.collection('config').doc('system').set({
           signers: state.signers,
           sigPosition: state.sigPosition,
+          title: state.autoFormTitle || '',
           updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-        }, { merge: true }).catch(err => console.warn('Firestore config 동기화 오류:', err));
+        }, { merge: true }).catch(() => {});
       }
-    } catch (e) {}
+    } catch (e) {
+      console.warn('saveLocalSettings error:', e);
+    }
   }
 
   // ==========================================================================
@@ -1428,20 +1601,56 @@
       return;
     }
 
-    // 이름 일치 검사 (공백 제거 후 비교)
-    const matchedSigner = state.signers.find(
+    // 이름 일치 검사 함수
+    const findSigner = () => state.signers.find(
       s => s.replace(/\s+/g, '') === normalizedInput
     );
+
+    const matchedSigner = findSigner();
 
     if (matchedSigner) {
       // 일치하는 경우: 요구사항 문구 “000 선생님 반갑습니다” 표기하고 서명란 제시
       el.nameErrorAlert.style.display = 'none';
       state.currentSignerName = matchedSigner;
       proceedToSigningStep(matchedSigner);
-    } else {
-      // 일치하는 성명이 없으면: 요구사항 문구 “다시 입력해 주세요” 표기
-      showNameError('다시 입력해 주세요');
+      return;
     }
+
+    // 다른 기기 접속 직후 클라우드 명단이 아직 수신되지 않은 경우
+    if (!isCloudSynced && rtdb) {
+      showNameError('⏳ 클라우드에서 최신 명단을 확인 중입니다. 잠시만 기다려 주세요...');
+
+      // 클라우드 데이터 수신 시 즉시 호출될 대기 핸들러 등록
+      window._pendingNameCheck = {
+        name: normalizedInput,
+        check: () => {
+          const cloudMatched = findSigner();
+          if (cloudMatched) {
+            el.nameErrorAlert.style.display = 'none';
+            state.currentSignerName = cloudMatched;
+            proceedToSigningStep(cloudMatched);
+            window._pendingNameCheck = null;
+          }
+        }
+      };
+
+      // 1.5초 후에도 없으면 최종 '다시 입력해 주세요' 표시
+      setTimeout(() => {
+        const finalMatched = findSigner();
+        if (finalMatched) {
+          el.nameErrorAlert.style.display = 'none';
+          state.currentSignerName = finalMatched;
+          proceedToSigningStep(finalMatched);
+        } else {
+          showNameError('다시 입력해 주세요');
+        }
+        window._pendingNameCheck = null;
+      }, 1500);
+      return;
+    }
+
+    // 일치하는 성명이 없으면: 요구사항 문구 “다시 입력해 주세요” 표기
+    showNameError('다시 입력해 주세요');
   }
 
   function showNameError(msg) {
@@ -2036,6 +2245,15 @@
         isAutoFormMode: d.isAutoFormMode !== false
       }));
       localStorage.setItem('yewon_docs_list', JSON.stringify(metaList));
+
+      // Realtime Database 클라우드 동기화 (모든 기기 실시간 전달)
+      if (rtdb) {
+        const docObj = {};
+        metaList.forEach(d => {
+          if (d.id) docObj[toSafeRtdbKey(d.id)] = d;
+        });
+        rtdb.ref('documents').set(docObj).catch(err => console.warn('RTDB docs 동기화 오류:', err));
+      }
     } catch (e) {
       console.warn('saveDocumentsList error:', e);
     }
@@ -2189,6 +2407,7 @@
     localStorage.setItem('yewon_auto_title', state.autoFormTitle);
     localStorage.setItem('yewon_auto_dept', state.autoFormDept);
     localStorage.setItem('yewon_signers', JSON.stringify(state.signers));
+    saveLocalSettings();
 
     // UI 입력창 반영
     if (el.autoFormTitle) el.autoFormTitle.value = state.autoFormTitle;
@@ -2490,18 +2709,35 @@
 
   // 사용자 서명 링크 복사
   function copySignerLink(specificName = null) {
-    const url = new URL(window.location.href);
+    let url;
+    try {
+      url = new URL(window.location.href);
+    } catch (e) {
+      url = new URL(window.location.pathname, window.location.origin);
+    }
     url.searchParams.delete('admin');
+    if (state.currentDocId) {
+      url.searchParams.set('doc', state.currentDocId);
+    }
     if (specificName) {
       url.searchParams.set('name', specificName);
     } else {
       url.searchParams.delete('name');
     }
 
-    navigator.clipboard.writeText(url.toString()).then(() => {
-      showToast(specificName ? `🔗 ${specificName} 선생님 전용 서명 링크가 복사되었습니다!` : '🔗 사용자 서명 링크가 복사되었습니다!');
+    const isFile = window.location.protocol === 'file:';
+    const linkStr = url.toString();
+
+    navigator.clipboard.writeText(linkStr).then(() => {
+      let msg = specificName
+        ? `🔗 ${specificName} 선생님 전용 서명 링크가 복사되었습니다!`
+        : '🔗 사용자 서명 링크가 복사되었습니다!';
+      if (isFile) {
+        msg += '\n\n(💡 알림: 현재 내 컴퓨터 로컬 파일(file://)로 실행 중입니다. 다른 PC/스마트폰에서 접속 시에는 웹 주소 또는 네트워크 공유 주소를 사용해 주세요)';
+      }
+      showToast(msg);
     }).catch(() => {
-      prompt('서명 링크 주소입니다. 복사하여 전달해 주세요:', url.toString());
+      prompt('서명 링크 주소입니다. 복사하여 전달해 주세요:', linkStr);
     });
   }
 
@@ -3132,13 +3368,20 @@
       console.warn('Bootstrap background storage load skipped:', dbErr);
     }
 
-    // 4. URL 파라미터 확인 (예: ?name=홍길동 or ?admin=true)
+    // 4. URL 파라미터 확인 (예: ?doc=docId or ?name=홍길동 or ?admin=true)
     try {
       const urlParams = new URLSearchParams(window.location.search);
+      const targetDocId = urlParams.get('doc');
+      if (targetDocId && state.documents && state.documents.some(d => d.id === targetDocId)) {
+        await switchToDocument(targetDocId);
+      }
       const directName = urlParams.get('name');
       if (directName && el.signerNameInput) {
         el.signerNameInput.value = directName;
-        handleCheckSignerName();
+        // 약간의 여유를 주어 클라우드 동기화와 조율
+        setTimeout(() => {
+          handleCheckSignerName();
+        }, 100);
       } else if (urlParams.get('admin') === 'true') {
         if (el.headerAdminPw) el.headerAdminPw.focus();
       }
