@@ -267,6 +267,12 @@ body {
   text-align: center;
 }
 
+.user-assigned-doc-card:hover {
+  border-color: #3b82f6 !important;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06) !important;
+  transform: translateY(-1px);
+}
+
 .welcome-icon-box {
   width: 68px;
   height: 68px;
@@ -968,5 +974,46 @@ body {
 .doc-item:hover {
   border-color: #93c5fd !important;
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.05);
+}
+
+/* Document Radio Item in Admin Mode */
+.doc-radio-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  background: #ffffff;
+  border: 1.5px solid var(--gray-200);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+.doc-radio-row:hover {
+  border-color: #93c5fd;
+  background: #f8fafc;
+}
+.doc-radio-row.selected {
+  border-color: var(--primary) !important;
+  background: #eff6ff !important;
+  box-shadow: 0 1px 4px rgba(37, 99, 235, 0.15);
+}
+.doc-radio-row .btn-delete-doc {
+  opacity: 0.6;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0.3rem 0.55rem;
+  font-size: 0.85rem;
+  border-radius: var(--radius-sm);
+  transition: all 0.15s ease;
+}
+.doc-radio-row:hover .btn-delete-doc {
+  opacity: 1;
+}
+.doc-radio-row .btn-delete-doc:hover {
+  color: #ef4444 !important;
+  background: #fee2e2 !important;
 }
 

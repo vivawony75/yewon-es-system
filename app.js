@@ -21,6 +21,7 @@
     cachedUnifiedPdfBytes: null,
     documents: [], // 다중 서류 관리 목록 [{ id, title, dept, createdAt, updatedAt, signers, signatures, ... }]
     currentDocId: null, // 현재 작업 중인 서류 ID
+    adminSelectedDocId: null, // 관리자 모드에서 라디오 버튼으로 선택된 서류 ID
     signers: [...(window.APP_CONFIG?.defaultSigners || ['홍길동', '김영희', '이철수', '박민수', '정수진'])],
     signatures: {}, // name -> { name, signedAt, signatureImage, pdfBlob }
     isAutoFormMode: true,
@@ -135,32 +136,11 @@
     // 1. Realtime Database 실시간 구독 (모든 기기 실시간 100% 동기화)
     if (rtdb) {
       try {
-        // (1) config/system 구독 (서명 대상자 명단, 양식 제목, 부서, 서명 위치)
+        // (1) config/system 구독 (전역 환경설정만 동기화, 서류별 개별 교사 명단은 침범하지 않음)
         rtdb.ref('config/system').on('value', (snapshot) => {
           const cfg = snapshot.val();
           if (cfg) {
             let changed = false;
-            if (Array.isArray(cfg.signers) && cfg.signers.length > 0) {
-              state.signers = cfg.signers;
-              localStorage.setItem('yewon_signers', JSON.stringify(state.signers));
-              changed = true;
-            }
-            if (cfg.autoFormTitle !== undefined && cfg.autoFormTitle !== null) {
-              state.autoFormTitle = cfg.autoFormTitle;
-              localStorage.setItem('yewon_auto_title', state.autoFormTitle);
-              if (el.autoFormTitle && document.activeElement !== el.autoFormTitle) {
-                el.autoFormTitle.value = state.autoFormTitle;
-              }
-              changed = true;
-            }
-            if (cfg.autoFormDept !== undefined && cfg.autoFormDept !== null) {
-              state.autoFormDept = cfg.autoFormDept;
-              localStorage.setItem('yewon_auto_dept', state.autoFormDept);
-              if (el.autoFormDept && document.activeElement !== el.autoFormDept) {
-                el.autoFormDept.value = state.autoFormDept;
-              }
-              changed = true;
-            }
             if (cfg.sigPosition) {
               state.sigPosition = { ...state.sigPosition, ...cfg.sigPosition };
               localStorage.setItem('yewon_sig_position', JSON.stringify(state.sigPosition));
@@ -177,59 +157,64 @@
               window._pendingNameCheck.check();
             }
 
-            // 사용자 화면에서 성명 입력 단계에 머물러 있는 경우 자동 재검증
-            if (el.userNameStep && el.userNameStep.style.display !== 'none') {
-              const currentInput = el.signerNameInput ? el.signerNameInput.value.trim() : '';
-              if (currentInput) {
-                const norm = currentInput.replace(/\s+/g, '');
-                if (state.signers.some(s => s.replace(/\s+/g, '') === norm)) {
-                  console.log('[예원전자서명] 클라우드 명단 수신 완료 -> 자동 로그인 진행');
-                  handleCheckSignerName();
-                }
-              }
-            }
-
             if (changed) {
-              if (typeof renderSignerTags === 'function') renderSignerTags();
-              if (typeof renderProgressTable === 'function') renderProgressTable();
-              if (typeof renderCompleteTable === 'function') renderCompleteTable();
-              if (typeof updateDashboardStats === 'function') updateDashboardStats();
-              if (state.isAutoFormMode && typeof generateAutoTablePdf === 'function') {
-                generateAutoTablePdf(state.autoFormTitle, state.autoFormDept, state.signers)
-                  .then(bytes => {
-                    state.pdfTemplate.bytes = bytes;
-                    state.pdfTemplate.name = `${state.autoFormTitle || '서명문서'}.pdf`;
-                    refreshAdminAndUserPreview();
-                  }).catch(() => {});
-              }
+              refreshAdminAndUserPreview();
             }
           }
         }, (err) => {
           console.warn('RTDB config 구독 오류:', err);
         });
 
-        // (2) signatures 구독 (실시간 서명 현황 반영)
+        // (2) signatures 구독 (현재 서류에 해당하는 실시간 서명 현황 반영)
         rtdb.ref('signatures').on('value', (snapshot) => {
           const val = snapshot.val();
           if (val && typeof val === 'object') {
             let changed = false;
-            Object.keys(val).forEach(key => {
-              const rec = val[key];
-              if (rec && rec.name) {
-                const existing = state.signatures[rec.name];
-                if (!existing || existing.signedAt !== rec.signedAt) {
-                  state.signatures[rec.name] = {
-                    name: rec.name,
-                    signedAt: rec.signedAt || new Date().toISOString(),
-                    signatureImage: rec.signatureImage || '',
-                    pdfUrl: rec.pdfUrl || null,
-                    pdfBlob: existing?.pdfBlob || null
-                  };
-                  changed = true;
+            const curDocId = state.currentDocId || 'default';
+            const curDocKey = toSafeRtdbKey(curDocId);
+
+            // 신규 서류별 서명 구조: signatures/docId/name
+            const docSigns = val[curDocKey];
+            if (docSigns && typeof docSigns === 'object') {
+              Object.keys(docSigns).forEach(key => {
+                const rec = docSigns[key];
+                if (rec && rec.name) {
+                  const existing = state.signatures[rec.name];
+                  if (!existing || existing.signedAt !== rec.signedAt) {
+                    state.signatures[rec.name] = {
+                      name: rec.name,
+                      signedAt: rec.signedAt || new Date().toISOString(),
+                      signatureImage: rec.signatureImage || '',
+                      pdfUrl: rec.pdfUrl || null,
+                      pdfBlob: existing?.pdfBlob || null
+                    };
+                    changed = true;
+                  }
                 }
-              }
-            });
+              });
+            } else {
+              // 레거시 signatures/name 구조 지원 (docId 일치 시에만 적용)
+              Object.keys(val).forEach(key => {
+                const rec = val[key];
+                if (rec && rec.name && (!rec.docId || rec.docId === curDocId)) {
+                  const existing = state.signatures[rec.name];
+                  if (!existing || existing.signedAt !== rec.signedAt) {
+                    state.signatures[rec.name] = {
+                      name: rec.name,
+                      signedAt: rec.signedAt || new Date().toISOString(),
+                      signatureImage: rec.signatureImage || '',
+                      pdfUrl: rec.pdfUrl || null,
+                      pdfBlob: existing?.pdfBlob || null
+                    };
+                    changed = true;
+                  }
+                }
+              });
+            }
+
             if (changed) {
+              const currentDoc = state.documents.find(d => d.id === state.currentDocId);
+              if (currentDoc) currentDoc.signatures = { ...state.signatures };
               if (typeof renderProgressTable === 'function') renderProgressTable();
               if (typeof renderCompleteTable === 'function') renderCompleteTable();
               if (typeof updateDashboardStats === 'function') updateDashboardStats();
@@ -239,7 +224,7 @@
           console.warn('RTDB signatures 구독 오류:', err);
         });
 
-        // (3) documents 구독 (다중 서류 목록 실시간 동기화)
+        // (3) documents 구독 (다중 서류 목록 실시간 동기화 - 서류별 독립 교사 명단 및 서명 유지)
         rtdb.ref('documents').on('value', (snapshot) => {
           const docsMap = snapshot.val();
           if (docsMap && typeof docsMap === 'object') {
@@ -247,7 +232,32 @@
             if (docList.length > 0) {
               state.documents = docList;
               localStorage.setItem('yewon_docs_list', JSON.stringify(docList));
+
+              // 현재 작업 중인 서류가 목록에 있다면 해당 서류의 고유 명단과 서명 동기화
+              const currentDoc = docList.find(d => d.id === state.currentDocId);
+              if (currentDoc) {
+                state.autoFormTitle = currentDoc.title || '';
+                state.autoFormDept = currentDoc.dept || '';
+                state.signers = Array.isArray(currentDoc.signers) ? [...currentDoc.signers] : [];
+                state.signatures = currentDoc.signatures ? { ...currentDoc.signatures } : {};
+                state.isAutoFormMode = currentDoc.isAutoFormMode !== false;
+
+                if (typeof renderSignerTags === 'function') renderSignerTags();
+                if (typeof renderProgressTable === 'function') renderProgressTable();
+                if (typeof renderCompleteTable === 'function') renderCompleteTable();
+                if (typeof updateDashboardStats === 'function') updateDashboardStats();
+                if (typeof updateActiveDocumentDisplays === 'function') updateActiveDocumentDisplays();
+              }
+
               if (typeof renderDocumentList === 'function') renderDocumentList();
+
+              // 사용자 화면의 서류 선택 단계 열려있을 시 갱신
+              if (el.userDocSelectStep && el.userDocSelectStep.style.display !== 'none' && state.currentSignerName) {
+                const assignedDocs = getAssignedDocsForTeacher(state.currentSignerName);
+                if (assignedDocs.length > 0) {
+                  showUserDocSelectStep(state.currentSignerName, assignedDocs);
+                }
+              }
             }
           }
         }, (err) => {
@@ -295,18 +305,10 @@
         firestore.collection('config').doc('system').onSnapshot((doc) => {
           if (doc.exists) {
             const cfg = doc.data();
-            if (cfg.signers && Array.isArray(cfg.signers) && cfg.signers.length > 0) {
-              state.signers = cfg.signers;
-              localStorage.setItem('yewon_signers', JSON.stringify(state.signers));
-            }
             if (cfg.sigPosition) {
               state.sigPosition = { ...state.sigPosition, ...cfg.sigPosition };
               localStorage.setItem('yewon_sig_position', JSON.stringify(state.sigPosition));
             }
-            if (typeof renderSignerTags === 'function') renderSignerTags();
-            if (typeof renderProgressTable === 'function') renderProgressTable();
-            if (typeof renderCompleteTable === 'function') renderCompleteTable();
-            if (typeof updateDashboardStats === 'function') updateDashboardStats();
           }
         }, (err) => {});
       } catch (e) {}
@@ -314,18 +316,26 @@
   }
 
   async function saveSignatureToDB(record) {
-    // 1. Firebase Realtime Database 저장 (실시간 클라우드 전송)
+    // 1. Firebase Realtime Database 저장 (실시간 클라우드 전송 - 서류별 경로 분리)
     if (rtdb) {
       try {
+        const curDocId = state.currentDocId || record.docId || 'default';
+        const safeDocKey = toSafeRtdbKey(curDocId);
         const safeKey = toSafeRtdbKey(record.name);
-        await rtdb.ref(`signatures/${safeKey}`).set({
+        
+        const payload = {
           name: record.name,
-          docId: state.currentDocId || '',
+          docId: curDocId,
           signedAt: record.signedAt || new Date().toISOString(),
           signatureImage: record.signatureImage || '',
           status: 'signed',
           updatedAt: new Date().toISOString()
-        });
+        };
+
+        // 서류별 서명 저장소
+        await rtdb.ref(`signatures/${safeDocKey}/${safeKey}`).set(payload);
+        // 레거시 호환
+        await rtdb.ref(`signatures/${safeKey}`).set(payload);
       } catch (rErr) {
         console.warn('RTDB 서명 저장 경고:', rErr);
       }
@@ -341,8 +351,11 @@
             tsDate = parsed;
           }
         }
-        await firestore.collection('signatures').doc(record.name).set({
+        const curDocId = state.currentDocId || record.docId || 'default';
+        const docDocKey = `${curDocId}_${record.name}`;
+        await firestore.collection('signatures').doc(docDocKey).set({
           name: record.name,
+          docId: curDocId,
           signedAt: firebase.firestore.Timestamp.fromDate(tsDate),
           signatureImage: record.signatureImage || '',
           status: 'signed',
@@ -357,7 +370,7 @@
       try {
         const tx = db.transaction('signatures', 'readwrite');
         const store = tx.objectStore('signatures');
-        store.put(record);
+        store.put({ ...record, docId: state.currentDocId });
         tx.oncomplete = () => resolve(true);
         tx.onerror = () => resolve(false);
       } catch (err) {
@@ -384,12 +397,17 @@
   async function removeSignatureFromDB(name) {
     if (rtdb) {
       try {
+        const curDocId = state.currentDocId || 'default';
+        const safeDocKey = toSafeRtdbKey(curDocId);
         const safeKey = toSafeRtdbKey(name);
+        await rtdb.ref(`signatures/${safeDocKey}/${safeKey}`).remove();
         await rtdb.ref(`signatures/${safeKey}`).remove();
       } catch (rErr) {}
     }
     if (firestore) {
       try {
+        const curDocId = state.currentDocId || 'default';
+        await firestore.collection('signatures').doc(`${curDocId}_${name}`).delete();
         await firestore.collection('signatures').doc(name).delete();
       } catch (fErr) {}
     }
@@ -407,13 +425,9 @@
     });
   }
 
-  // 로컬스토리지 설정 로드 및 동기화
+  // 로컬스토리지 설정 로드 및 동기화 (전역 설정: 서명 위치 등)
   function loadLocalSettings() {
     try {
-      const savedSigners = localStorage.getItem('yewon_signers');
-      if (savedSigners) {
-        state.signers = JSON.parse(savedSigners);
-      }
       const savedPos = localStorage.getItem('yewon_sig_position');
       if (savedPos) {
         state.sigPosition = { ...state.sigPosition, ...JSON.parse(savedPos) };
@@ -425,18 +439,11 @@
 
   function saveLocalSettings() {
     try {
-      localStorage.setItem('yewon_signers', JSON.stringify(state.signers));
       localStorage.setItem('yewon_sig_position', JSON.stringify(state.sigPosition));
-      localStorage.setItem('yewon_auto_title', state.autoFormTitle || '');
-      localStorage.setItem('yewon_auto_dept', state.autoFormDept || '');
 
-      // Realtime Database 실시간 클라우드 동기화 (모든 기기 실시간 전송)
+      // Realtime Database 실시간 클라우드 동기화 (전역 환경설정)
       if (rtdb) {
         rtdb.ref('config/system').set({
-          signers: state.signers,
-          autoFormTitle: state.autoFormTitle || '',
-          autoFormDept: state.autoFormDept || '',
-          currentDocId: state.currentDocId || '',
           sigPosition: state.sigPosition,
           updatedAt: new Date().toISOString()
         }).catch(err => console.warn('RTDB config 동기화 오류:', err));
@@ -445,9 +452,7 @@
       // Firestore 동기화 (백업)
       if (firestore) {
         firestore.collection('config').doc('system').set({
-          signers: state.signers,
           sigPosition: state.sigPosition,
-          title: state.autoFormTitle || '',
           updatedAt: firebase.firestore.FieldValue.serverTimestamp()
         }, { merge: true }).catch(() => {});
       }
@@ -465,11 +470,15 @@
     }
     const { PDFDocument } = window.PDFLib;
 
-    const docTitle = (title !== undefined ? title : (state.autoFormTitle || '')).trim();
-    const docDept = (dept !== undefined ? dept : (state.autoFormDept || '')).trim();
-    const signerList = Array.isArray(signers) && signers.length > 0 
-      ? signers 
-      : (state.signers && state.signers.length > 0 ? state.signers : ['홍길동', '김영희', '이철수', '박민수', '정수진']);
+    const docTitle = (title !== undefined && title !== null ? String(title) : (state.autoFormTitle || '')).trim();
+    const docDept = (dept !== undefined && dept !== null ? String(dept) : (state.autoFormDept || '')).trim();
+
+    let signerList = [];
+    if (Array.isArray(signers)) {
+      signerList = signers.map(s => String(s).trim()).filter(s => s.length > 0);
+    } else if (Array.isArray(state.signers)) {
+      signerList = state.signers.map(s => String(s).trim()).filter(s => s.length > 0);
+    }
 
     // A4 규격: 595.28 pt x 841.89 pt (고화질 2배율 Canvas: 1191 x 1684 px)
     const scale = 2.0;
@@ -489,7 +498,7 @@
     ctx.fillStyle = '#2563eb';
     ctx.fillRect(36 * scale, 24 * scale, 523.28 * scale, 3 * scale);
 
-    // 2. 문서 제목 (제목이 입력되어 있을 때만 작성되는 문서 상단 중앙에 크게 표기)
+    // 2. 문서 제목 (제목이 입력되어 있을 때 상단 중앙에 크게 표기)
     if (docTitle) {
       ctx.fillStyle = '#0f172a';
       ctx.textAlign = 'center';
@@ -497,6 +506,12 @@
       ctx.font = `bold ${Math.round(18.5 * scale)}px "Malgun Gothic", "Pretendard", "Apple SD Gothic Neo", sans-serif`;
       const titleY = 52 * scale;
       ctx.fillText(docTitle, canvasW / 2, titleY);
+    } else {
+      ctx.fillStyle = '#94a3b8';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = `normal ${Math.round(13 * scale)}px "Malgun Gothic", "Pretendard", sans-serif`;
+      ctx.fillText('(문서 제목을 입력해 주세요)', canvasW / 2, 52 * scale);
     }
 
     // 3. 부서 또는 담당자명 (제목 우측 아래에 제목보다 작은 글씨로 표기)
@@ -518,14 +533,14 @@
     ctx.stroke();
 
     // 4. 2열 분할 계산
-    // "n명이면 왼쪽에 1번부터 세로로 n/2번까지, 오른쪽에 그 다음 번호부터 끝번호까지. 홀수면 왼쪽에 한 명 더 오게."
     const totalN = signerList.length;
     const leftCount = Math.ceil(totalN / 2); // 홀수면 왼쪽에 한 명 더 배치
     const rightCount = totalN - leftCount;
-    const maxRows = Math.max(leftCount, 1);
+    // 등록된 대상자가 없으면 기본 안내 빈 행 5개 표시
+    const maxRows = totalN > 0 ? Math.max(leftCount, 1) : 5;
 
-    const leftSigners = signerList.slice(0, leftCount);
-    const rightSigners = signerList.slice(leftCount);
+    const leftSigners = totalN > 0 ? signerList.slice(0, leftCount) : [];
+    const rightSigners = totalN > 0 ? signerList.slice(leftCount) : [];
 
     // 5. 표 규격 및 위치 계산 (좌우 각각 최대 30명씩 A4 한 장에 완벽 수용되는 행 높이 설정)
     const tableTop = 92 * scale;
@@ -574,20 +589,20 @@
       ctx.fillText('성명', startX + seqW + (nameW / 2), headerTextY);
       ctx.fillText('서명 (날인)', startX + seqW + nameW + (signW / 2), headerTextY);
 
-      // 2) 데이터 행 그리기 (균일한 테두리 및 30명 수용 높이 적용)
+      // 2) 데이터 행 그리기
       for (let r = 0; r < maxRows; r++) {
         const rowY = tableTop + headerH + (r * targetRowH);
         const name = signersSubset[r] || '';
         const seqNumber = startSeqIndex + r + 1;
 
-        // 행 테두리 사각형 (단일 색상 및 동일 두께로 균일화)
+        // 행 테두리 사각형
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(startX, rowY, singleColW, targetRowH);
         ctx.strokeStyle = tableBorderColor;
         ctx.lineWidth = tableBorderWidth;
         ctx.strokeRect(startX, rowY, singleColW, targetRowH);
 
-        // 세로 구분선 (동일한 색상 및 두께)
+        // 세로 구분선
         ctx.beginPath();
         ctx.moveTo(startX + seqW, rowY);
         ctx.lineTo(startX + seqW, rowY + targetRowH);
@@ -635,13 +650,27 @@
             height: pdfH
           };
         } else {
-          // 우측 열 빈 칸 처리 (사선 표시)
-          ctx.strokeStyle = '#cbd5e1';
-          ctx.lineWidth = 1 * scale;
-          ctx.beginPath();
-          ctx.moveTo(startX, rowY);
-          ctx.lineTo(startX + singleColW, rowY + targetRowH);
-          ctx.stroke();
+          if (totalN === 0) {
+            // 등록된 대상자가 아직 없는 경우: 깔끔한 빈 서명란 행 표시
+            ctx.fillStyle = '#94a3b8';
+            ctx.font = `normal ${Math.round(9.5 * scale)}px "Malgun Gothic", sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.fillText(String(seqNumber), startX + (seqW / 2), rowTextY);
+
+            ctx.fillStyle = '#cbd5e1';
+            ctx.font = `normal ${Math.round(8.5 * scale)}px "Malgun Gothic", sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.fillText('(성명)', startX + seqW + (nameW / 2), rowTextY);
+            ctx.fillText('(인)', startX + seqW + nameW + (signW / 2), rowTextY);
+          } else {
+            // 우측 열 빈 칸 처리 (사선 표시)
+            ctx.strokeStyle = '#cbd5e1';
+            ctx.lineWidth = 1 * scale;
+            ctx.beginPath();
+            ctx.moveTo(startX, rowY);
+            ctx.lineTo(startX + singleColW, rowY + targetRowH);
+            ctx.stroke();
+          }
         }
       }
     }
@@ -708,9 +737,18 @@
     btnCheckName: document.getElementById('btnCheckName'),
     nameErrorAlert: document.getElementById('nameErrorAlert'),
 
+    // User Screen: Multi-Doc Selection Step
+    userDocSelectStep: document.getElementById('userDocSelectStep'),
+    userDocSelectGreeting: document.getElementById('userDocSelectGreeting'),
+    userAssignedDocList: document.getElementById('userAssignedDocList'),
+    btnBackToNameStep: document.getElementById('btnBackToNameStep'),
+
     // Signing Screen
     userSigningStep: document.getElementById('userSigningStep'),
     teacherGreetingTitle: document.getElementById('teacherGreetingTitle'),
+    userSigningDocBadge: document.getElementById('userSigningDocBadge'),
+    userSigningDocTitle: document.getElementById('userSigningDocTitle'),
+    btnBackToDocList: document.getElementById('btnBackToDocList'),
     btnReenterName: document.getElementById('btnReenterName'),
     docFileNameBadge: document.getElementById('docFileNameBadge'),
     userDocViewerFrame: document.getElementById('userDocViewerFrame'),
@@ -726,6 +764,9 @@
     // Complete Screen
     userCompleteStep: document.getElementById('userCompleteStep'),
     completedTeacherName: document.getElementById('completedTeacherName'),
+    completedDocTitleDisplay: document.getElementById('completedDocTitleDisplay'),
+    btnNextAssignedDoc: document.getElementById('btnNextAssignedDoc'),
+    btnReturnToDocList: document.getElementById('btnReturnToDocList'),
     btnDownloadMySignedPdf: document.getElementById('btnDownloadMySignedPdf'),
     btnRestartUserFlow: document.getElementById('btnRestartUserFlow'),
 
@@ -734,6 +775,9 @@
     btnCreateNewDoc: document.getElementById('btnCreateNewDoc'),
     docListContainer: document.getElementById('docListContainer'),
     docCountBadge: document.getElementById('docCountBadge'),
+    adminDocNoSelectionNotice: document.getElementById('adminDocNoSelectionNotice'),
+    adminDocDetailArea: document.getElementById('adminDocDetailArea'),
+    selectedDocBannerTitle: document.getElementById('selectedDocBannerTitle'),
     tabButtons: document.querySelectorAll('.tab-btn'),
     tabContents: document.querySelectorAll('.tab-content'),
 
@@ -777,6 +821,9 @@
     btnCopyUserSignLink: document.getElementById('btnCopyUserSignLink'),
     btnRefreshProgress: document.getElementById('btnRefreshProgress'),
     progressTableBody: document.getElementById('progressTableBody'),
+    progressDocViewerFrame: document.getElementById('progressDocViewerFrame'),
+    progressDocPagesContainer: document.getElementById('progressDocPagesContainer'),
+    btnRefreshProgressDoc: document.getElementById('btnRefreshProgressDoc'),
 
     // Admin: [완료] Tab
     radioModeAllInOne: document.getElementById('radioModeAllInOne'),
@@ -1510,17 +1557,14 @@
     }
     const { PDFDocument } = window.PDFLib;
 
-    // 항상 최신 명단과 서식으로 깨끗한 원본 양식을 준비
+    // 현재 선택된 서류의 최신 제목, 부서, 서명대상자 명단으로 깨끗한 원본 양식을 준비
     let templateBytes;
-    if (state.isAutoFormMode) {
+    if (state.isAutoFormMode || !state.pdfTemplate.bytes) {
       templateBytes = await generateAutoTablePdf(state.autoFormTitle, state.autoFormDept, state.signers);
       state.pdfTemplate.bytes = templateBytes;
+      state.pdfTemplate.name = `${state.autoFormTitle || '서명 양식'}.pdf`;
     } else {
       templateBytes = state.pdfTemplate.bytes;
-      if (!templateBytes) {
-        templateBytes = await generateDefaultPdfTemplate();
-        state.pdfTemplate.bytes = templateBytes;
-      }
     }
 
     const pdfDoc = await PDFDocument.load(templateBytes.slice());
@@ -1529,7 +1573,8 @@
     let signedCount = 0;
 
     // 등록된 모든 대상자 중 서명이 제출된 사용자의 서명을 순회하여 각자의 고유 서명란에 날인
-    for (const signerName of state.signers) {
+    const curSigners = Array.isArray(state.signers) ? state.signers : [];
+    for (const signerName of curSigners) {
       const record = state.signatures[signerName];
       if (record && record.signatureImage) {
         try {
@@ -1598,6 +1643,16 @@
   // [8] 사용자 화면 로직 (User View Controller)
   // ==========================================================================
   
+  // 선생님 성명 기반 배정된 서류 목록 필터링 (서류별 독립 배정)
+  function getAssignedDocsForTeacher(teacherName) {
+    if (!teacherName) return [];
+    const norm = String(teacherName).replace(/\s+/g, '');
+    return (state.documents || []).filter(doc => {
+      const signers = Array.isArray(doc.signers) ? doc.signers : [];
+      return signers.some(s => s && String(s).replace(/\s+/g, '') === norm);
+    });
+  }
+
   // 1단계: 성명 확인 처리
   function handleCheckSignerName() {
     const rawInput = el.signerNameInput ? el.signerNameInput.value.trim() : '';
@@ -1619,18 +1674,29 @@
       return;
     }
 
-    // 이름 일치 검사 함수
-    const findSigner = () => state.signers.find(
-      s => s.replace(/\s+/g, '') === normalizedInput
-    );
+    // 전체 서류 중 해당 선생님이 명단에 포함된 서류 검색
+    const assignedDocs = getAssignedDocsForTeacher(normalizedInput);
 
-    const matchedSigner = findSigner();
-
-    if (matchedSigner) {
-      // 일치하는 경우: 요구사항 문구 “000 선생님 반갑습니다” 표기하고 서명란 제시
+    if (assignedDocs.length > 0) {
       el.nameErrorAlert.style.display = 'none';
-      state.currentSignerName = matchedSigner;
-      proceedToSigningStep(matchedSigner);
+
+      // 실제 등록된 정확한 성명 형태 추출
+      let exactName = rawInput;
+      for (const doc of assignedDocs) {
+        const found = doc.signers.find(s => s && String(s).replace(/\s+/g, '') === normalizedInput);
+        if (found) { exactName = found; break; }
+      }
+      state.currentSignerName = exactName;
+
+      if (assignedDocs.length === 1) {
+        // 배정된 서류가 1건인 경우 바로 해당 서류로 전환 후 서명란 제시
+        switchToDocument(assignedDocs[0].id).then(() => {
+          proceedToSigningStep(exactName, assignedDocs[0]);
+        });
+      } else {
+        // 배정된 서류가 여러 건인 경우 서류 선택 화면 제시
+        showUserDocSelectStep(exactName, assignedDocs);
+      }
       return;
     }
 
@@ -1638,37 +1704,57 @@
     if (!isCloudSynced && rtdb) {
       showNameError('⏳ 클라우드에서 최신 명단을 확인 중입니다. 잠시만 기다려 주세요...');
 
-      // 클라우드 데이터 수신 시 즉시 호출될 대기 핸들러 등록
       window._pendingNameCheck = {
         name: normalizedInput,
         check: () => {
-          const cloudMatched = findSigner();
-          if (cloudMatched) {
+          const cloudAssigned = getAssignedDocsForTeacher(normalizedInput);
+          if (cloudAssigned.length > 0) {
             el.nameErrorAlert.style.display = 'none';
-            state.currentSignerName = cloudMatched;
-            proceedToSigningStep(cloudMatched);
+            let exactName = rawInput;
+            for (const doc of cloudAssigned) {
+              const found = doc.signers.find(s => s && String(s).replace(/\s+/g, '') === normalizedInput);
+              if (found) { exactName = found; break; }
+            }
+            state.currentSignerName = exactName;
+            if (cloudAssigned.length === 1) {
+              switchToDocument(cloudAssigned[0].id).then(() => {
+                proceedToSigningStep(exactName, cloudAssigned[0]);
+              });
+            } else {
+              showUserDocSelectStep(exactName, cloudAssigned);
+            }
             window._pendingNameCheck = null;
           }
         }
       };
 
-      // 1.5초 후에도 없으면 최종 '다시 입력해 주세요' 표시
       setTimeout(() => {
-        const finalMatched = findSigner();
-        if (finalMatched) {
+        const finalAssigned = getAssignedDocsForTeacher(normalizedInput);
+        if (finalAssigned.length > 0) {
           el.nameErrorAlert.style.display = 'none';
-          state.currentSignerName = finalMatched;
-          proceedToSigningStep(finalMatched);
+          let exactName = rawInput;
+          for (const doc of finalAssigned) {
+            const found = doc.signers.find(s => s && String(s).replace(/\s+/g, '') === normalizedInput);
+            if (found) { exactName = found; break; }
+          }
+          state.currentSignerName = exactName;
+          if (finalAssigned.length === 1) {
+            switchToDocument(finalAssigned[0].id).then(() => {
+              proceedToSigningStep(exactName, finalAssigned[0]);
+            });
+          } else {
+            showUserDocSelectStep(exactName, finalAssigned);
+          }
         } else {
-          showNameError('다시 입력해 주세요');
+          showNameError('다시 입력해 주세요 (등록된 서명 대상자 명단에 없습니다)');
         }
         window._pendingNameCheck = null;
       }, 1500);
       return;
     }
 
-    // 일치하는 성명이 없으면: 요구사항 문구 “다시 입력해 주세요” 표기
-    showNameError('다시 입력해 주세요');
+    // 일치하는 성명이 없으면
+    showNameError('다시 입력해 주세요 (등록된 서명 대상자 명단에 없습니다)');
   }
 
   function showNameError(msg) {
@@ -1677,15 +1763,101 @@
     el.signerNameInput.focus();
   }
 
-  // 2단계: 서명 화면으로 전환 (요구사항: “000 선생님 반갑습니다” 표기하고 서명란 제시)
-  async function proceedToSigningStep(teacherName) {
+  // 1.5단계: 배정된 다중 서류 선택 화면 렌더링
+  function showUserDocSelectStep(teacherName, assignedDocs) {
     el.userNameStep.style.display = 'none';
+    if (el.userSigningStep) el.userSigningStep.style.display = 'none';
+    if (el.userCompleteStep) el.userCompleteStep.style.display = 'none';
+    if (el.userDocSelectStep) el.userDocSelectStep.style.display = 'block';
+
+    if (el.userDocSelectGreeting) {
+      el.userDocSelectGreeting.textContent = `${teacherName} 선생님 반갑습니다`;
+    }
+
+    if (!el.userAssignedDocList) return;
+    el.userAssignedDocList.innerHTML = '';
+
+    assignedDocs.forEach((doc, idx) => {
+      const isSigned = doc.signatures && !!doc.signatures[teacherName];
+      const card = document.createElement('div');
+      card.className = 'user-assigned-doc-card';
+      card.style.cssText = `
+        background: #ffffff;
+        border: 1.5px solid ${isSigned ? '#bbf7d0' : '#bfdbfe'};
+        border-radius: 12px;
+        padding: 1rem 1.25rem;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        transition: all 0.2s ease;
+      `;
+
+      card.innerHTML = `
+        <div style="flex: 1; min-width: 0;">
+          <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.25rem;">
+            <span style="font-size: 0.75rem; font-weight: 700; color: #64748b; background: #f1f5f9; padding: 0.15rem 0.45rem; border-radius: 4px;">#${idx + 1}</span>
+            <span style="font-weight: 700; font-size: 1.02rem; color: #1e293b; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+              ${doc.title || '제목 없는 서류'}
+            </span>
+          </div>
+          <div style="font-size: 0.82rem; color: #64748b; display: flex; gap: 0.75rem; align-items: center;">
+            ${doc.dept ? `<span>🏛️ ${doc.dept}</span>` : ''}
+            <span>👥 총 배정 교사: ${doc.signers ? doc.signers.length : 0}명</span>
+          </div>
+        </div>
+        <div style="flex-shrink: 0;">
+          ${isSigned 
+            ? `<div style="display: flex; flex-direction: column; align-items: flex-end; gap: 0.25rem;">
+                 <span class="badge badge-success" style="font-size: 0.82rem; padding: 0.35rem 0.65rem;">✓ 서명 완료</span>
+                 <button type="button" class="btn-re-sign" data-id="${doc.id}" style="font-size: 0.75rem; color: #64748b; background: none; border: none; text-decoration: underline; cursor: pointer; padding: 0.1rem 0.3rem;">다시 서명하기</button>
+               </div>`
+            : `<button type="button" class="btn-go-sign" data-id="${doc.id}" style="background: linear-gradient(135deg, #2563eb, #1d4ed8); color: white; border: none; border-radius: 8px; padding: 0.55rem 1.1rem; font-size: 0.9rem; font-weight: 700; cursor: pointer; box-shadow: 0 2px 4px rgba(37,99,235,0.25); display: inline-flex; align-items: center; gap: 0.35rem;">
+                 ✍️ 서명하기
+               </button>`
+          }
+        </div>
+      `;
+
+      card.querySelectorAll('.btn-go-sign, .btn-re-sign').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const docId = btn.getAttribute('data-id');
+          await switchToDocument(docId);
+          proceedToSigningStep(teacherName, doc);
+        });
+      });
+
+      el.userAssignedDocList.appendChild(card);
+    });
+  }
+
+  // 2단계: 서명 화면으로 전환 (요구사항: “000 선생님 반갑습니다” 표기 및 대상 서류 제시)
+  async function proceedToSigningStep(teacherName, docObj) {
+    el.userNameStep.style.display = 'none';
+    if (el.userDocSelectStep) el.userDocSelectStep.style.display = 'none';
     el.userSigningStep.style.display = 'block';
     el.userCompleteStep.style.display = 'none';
 
     // 요구사항: “000 선생님 반갑습니다” 표기
     if (el.teacherGreetingTitle) {
       el.teacherGreetingTitle.textContent = `${teacherName} 선생님 반갑습니다`;
+    }
+
+    // 서명 대상 서류명 배지 업데이트
+    const activeDoc = docObj || state.documents.find(d => d.id === state.currentDocId);
+    const docTitle = activeDoc ? (activeDoc.title || '제목 없는 서류') : (state.autoFormTitle || '서약서 양식');
+    if (el.userSigningDocTitle) {
+      el.userSigningDocTitle.textContent = docTitle;
+    }
+    if (el.docFileNameBadge) {
+      el.docFileNameBadge.textContent = `${docTitle}.pdf`;
+    }
+
+    // 배정된 서류가 2개 이상이면 [다른 서류 선택] 버튼 표시
+    const assignedDocs = getAssignedDocsForTeacher(teacherName);
+    if (el.btnBackToDocList) {
+      el.btnBackToDocList.style.display = assignedDocs.length > 1 ? 'inline-block' : 'none';
     }
 
     // 캔버스 초기화
@@ -1697,6 +1869,8 @@
   // 성명 다시 입력하기 버튼
   function handleReenterName() {
     el.userSigningStep.style.display = 'none';
+    if (el.userDocSelectStep) el.userDocSelectStep.style.display = 'none';
+    if (el.userCompleteStep) el.userCompleteStep.style.display = 'none';
     el.userNameStep.style.display = 'block';
     el.signerNameInput.value = '';
     el.signerNameInput.focus();
@@ -1735,6 +1909,7 @@
       // 저장 레코드 구성
       const record = {
         name: teacherName,
+        docId: state.currentDocId,
         signedAt: signedAt,
         signatureImage: signatureDataUrl,
         pdfBytes: signedPdfBytes
@@ -1742,17 +1917,51 @@
 
       state.signatures[teacherName] = record;
       state.cachedUnifiedPdfBytes = null; // 통합 문서 캐시 무효화
+
+      // 현재 서류의 signatures 데이터에 확실히 격리 저장
+      const currentDoc = state.documents.find(d => d.id === state.currentDocId);
+      if (currentDoc) {
+        if (!currentDoc.signatures) currentDoc.signatures = {};
+        currentDoc.signatures[teacherName] = record;
+      }
+      saveDocumentsList();
+
       await saveSignatureToDB(record);
 
       // 사용자 완료 화면 전환 및 성공 알림
       el.userSigningStep.style.display = 'none';
       el.userCompleteStep.style.display = 'block';
       el.completedTeacherName.textContent = teacherName;
+
+      const docTitle = currentDoc ? (currentDoc.title || '서류') : '서류';
+      if (el.completedDocTitleDisplay) {
+        el.completedDocTitleDisplay.textContent = `[${docTitle}] 서명이 완료되었습니다.`;
+      }
+
+      // 다른 배정 서류 잔여 여부 확인
+      const assignedDocs = getAssignedDocsForTeacher(teacherName);
+      const pendingDocs = assignedDocs.filter(d => !d.signatures || !d.signatures[teacherName]);
+
+      if (assignedDocs.length > 1) {
+        if (el.btnReturnToDocList) el.btnReturnToDocList.style.display = 'inline-block';
+        if (pendingDocs.length > 0) {
+          if (el.btnNextAssignedDoc) {
+            el.btnNextAssignedDoc.textContent = `다음 서류 서명하기 (${pendingDocs.length}건 남음)`;
+            el.btnNextAssignedDoc.style.display = 'inline-block';
+          }
+        } else {
+          if (el.btnNextAssignedDoc) el.btnNextAssignedDoc.style.display = 'none';
+          showToast(`🎉 ${teacherName} 선생님께 지정된 모든 서류(${assignedDocs.length}건)의 서명이 완료되었습니다!`);
+        }
+      } else {
+        if (el.btnNextAssignedDoc) el.btnNextAssignedDoc.style.display = 'none';
+        if (el.btnReturnToDocList) el.btnReturnToDocList.style.display = 'none';
+      }
+
       showToast(`🎉 ${teacherName} 선생님의 서명이 성공적으로 제출되었습니다!`);
 
       // 관리자 실시간 테이블 및 서류 목록 자동 갱신
       try {
-        saveDocumentsList();
         renderDocumentList();
         renderProgressTable();
         renderCompleteTable();
@@ -1760,7 +1969,7 @@
         updateDashboardStats();
         refreshAdminAndUserPreview();
       } catch (uiErr) {
-        console.warn('관리자 화면 갱신 알림 (서명은 정상 제출 완료됨):', uiErr);
+        console.warn('관리자 화면 갱신 알림:', uiErr);
       }
     } catch (err) {
       console.error('Signature submission error:', err);
@@ -1786,6 +1995,8 @@
   // 첫 화면으로 돌아가기
   function handleRestartUserFlow() {
     el.userCompleteStep.style.display = 'none';
+    if (el.userDocSelectStep) el.userDocSelectStep.style.display = 'none';
+    if (el.userSigningStep) el.userSigningStep.style.display = 'none';
     el.userNameStep.style.display = 'block';
     el.signerNameInput.value = '';
     el.signerNameInput.focus();
@@ -1884,7 +2095,18 @@
       el.currentRoleBadge.style.color = '#b45309';
     }
 
+    // 관리자 모드 진입 시: 라디오 버튼으로 서류를 선택하지 않은 상태면 서류 제목 목록만 보이고 상세 영역은 숨김
+    if (!state.adminSelectedDocId) {
+      if (el.adminDocNoSelectionNotice) el.adminDocNoSelectionNotice.style.display = 'block';
+      if (el.adminDocDetailArea) el.adminDocDetailArea.style.display = 'none';
+    } else {
+      if (el.adminDocNoSelectionNotice) el.adminDocNoSelectionNotice.style.display = 'none';
+      if (el.adminDocDetailArea) el.adminDocDetailArea.style.display = 'block';
+      updateActiveDocumentDisplays();
+    }
+
     // 관리자 뷰 로드
+    renderDocumentList();
     renderSignerTags();
     renderProgressTable();
     renderCompleteTable();
@@ -1892,9 +2114,11 @@
     updateDashboardStats();
     syncConfigInputs();
     refreshAdminAndUserPreview();
+    updateActiveDocumentDisplays();
   }
 
   function switchToUserView() {
+    state.adminSelectedDocId = null; // 관리자 모드 나갈 때 선택 초기화 (재진입 시 서류 제목만 보이도록)
     el.adminViewSection.style.display = 'none';
     el.userViewSection.style.display = 'block';
 
@@ -1956,8 +2180,107 @@
     }
   }
 
+  // [시작], [진행], [완료] 상단 서류 안내 바 일괄 갱신
+  function updateActiveDocumentDisplays() {
+    const title = (state.autoFormTitle || '').trim() || '제목 없는 문서';
+    const dept = (state.autoFormDept || '').trim();
+    const totalSigners = state.signers ? state.signers.length : 0;
+    const completedSigners = state.signers ? state.signers.filter(name => !!state.signatures[name]).length : 0;
+    const percent = totalSigners > 0 ? Math.round((completedSigners / totalSigners) * 100) : 0;
+    const modeLabel = state.isAutoFormMode ? '자동 표 양식' : '업로드 PDF';
+
+    // 1) 상단 배너 타이틀 및 메타 텍스트 일괄 업데이트
+    const titleDisplays = document.querySelectorAll('.active-doc-title-display');
+    titleDisplays.forEach(node => {
+      node.textContent = title;
+    });
+
+    const metaDisplays = document.querySelectorAll('.active-doc-meta-display');
+    metaDisplays.forEach(node => {
+      node.innerHTML = `
+        <span style="margin-right: 0.6rem;">🏢 부서: <strong>${dept || '미지정'}</strong></span>
+        <span style="margin-right: 0.6rem;">👥 대상: <strong>${totalSigners}명</strong></span>
+        <span style="margin-right: 0.6rem;">✍️ 완료: <strong>${completedSigners}명 (${percent}%)</strong></span>
+        <span>📋 양식: <strong>${modeLabel}</strong></span>
+      `;
+    });
+
+    if (el.selectedDocBannerTitle) {
+      el.selectedDocBannerTitle.textContent = title;
+    }
+  }
+
+  // [진행] 탭: 실시간 서명 현황 반영 문서 미리보기 렌더링
+  async function renderProgressDocView() {
+    if (!el.progressDocPagesContainer) return;
+
+    el.progressDocPagesContainer.innerHTML = '<div style="padding: 2.5rem; text-align: center; color: #64748b;">⏳ 실시간 서명 문서를 불러오는 중입니다...</div>';
+
+    try {
+      // 실시간 서명이 날인된 통합 PDF 생성 또는 기본 템플릿 렌더링
+      const unifiedBytes = await generateUnifiedPdf();
+      await renderPdfToContainer(unifiedBytes, el.progressDocPagesContainer, null, false);
+    } catch (err) {
+      console.warn('Progress doc view render error, fallback to template:', err);
+      if (state.pdfTemplate.bytes) {
+        await renderPdfToContainer(state.pdfTemplate.bytes, el.progressDocPagesContainer, null, false);
+      } else {
+        el.progressDocPagesContainer.innerHTML = '<div style="padding: 2.5rem; text-align: center; color: #94a3b8;">서류 양식 문서를 준비 중입니다.</div>';
+      }
+    }
+  }
+
+  // [시작], [진행], [완료] 모든 메뉴의 서류양식 미리보기 일괄 즉시 갱신
+  async function refreshAllAdminPreviews() {
+    try {
+      // 1. 현재 서류에 대한 최신 표 양식 PDF 생성 (서류 제목, 부서, 서명대상자 명단 기반)
+      if (state.isAutoFormMode || !state.pdfTemplate.bytes) {
+        const autoBytes = await generateAutoTablePdf(state.autoFormTitle, state.autoFormDept, state.signers);
+        state.pdfTemplate.name = `${state.autoFormTitle || '서명 양식'}.pdf`;
+        state.pdfTemplate.bytes = autoBytes;
+        state.cachedUnifiedPdfBytes = null; // 통합본 캐시 무효화하여 최신 반영 보장
+      }
+
+      if (el.currentFormName) {
+        el.currentFormName.textContent = state.pdfTemplate.name || '2열 표준 표 양식';
+      }
+
+      // 2. 상단 안내 바 및 메타 텍스트 일괄 갱신
+      updateActiveDocumentDisplays();
+
+      // 3. [시작] 메뉴 탭: 서명 위치 미리보기 갱신
+      if (el.adminDocPagesContainer && state.pdfTemplate.bytes) {
+        await renderPdfToContainer(state.pdfTemplate.bytes, el.adminDocPagesContainer, {
+          page: Number(state.sigPosition.page || 1),
+          x: Number(state.sigPosition.x || 390),
+          y: Number(state.sigPosition.y || 125),
+          width: Number(state.sigPosition.width || 135),
+          height: Number(state.sigPosition.height || 52),
+          label: '✍️ 서명 날인 위치 (클릭하여 칸 이동 가능)'
+        }, true);
+      }
+
+      // 4. [진행] 메뉴 탭: 실시간 서명 문서 미리보기 갱신
+      if (el.progressDocPagesContainer) {
+        await renderProgressDocView();
+      }
+
+      // 5. [완료] 메뉴 탭: 통합 서명 인쇄본 미리보기 갱신
+      if (el.unifiedDocPagesContainer) {
+        await renderUnifiedDocumentView();
+      }
+
+      // 6. 사용자 화면 양식 미리보기 갱신
+      if (el.userDocPagesContainer && !state.currentSignerName && state.pdfTemplate.bytes) {
+        await renderPdfToContainer(state.pdfTemplate.bytes, el.userDocPagesContainer);
+      }
+    } catch (err) {
+      console.warn('refreshAllAdminPreviews error:', err);
+    }
+  }
+
   // 관리자 탭 전환 ([시작], [진행], [완료])
-  function handleTabClick(btn) {
+  async function handleTabClick(btn) {
     const targetTabId = btn.getAttribute('data-tab');
 
     el.tabButtons.forEach(b => b.classList.remove('active'));
@@ -1969,13 +2292,17 @@
       targetContent.classList.add('active');
     }
 
+    updateActiveDocumentDisplays();
+
+    // 탭 전환 시 각 메뉴의 서류양식 미리보기가 즉시 렌더링되도록 보장
     if (targetTabId === 'tab-start') {
-      refreshAdminAndUserPreview();
+      await refreshAdminAndUserPreview();
     } else if (targetTabId === 'tab-progress') {
       renderProgressTable();
       updateDashboardStats();
+      await renderProgressDocView();
     } else if (targetTabId === 'tab-complete') {
-      updateCompleteTabUI();
+      await updateCompleteTabUI();
     }
   }
 
@@ -2171,6 +2498,13 @@
       state.autoFormDept = dept;
       state.isAutoFormMode = true;
 
+      const currentDoc = state.documents.find(d => d.id === state.currentDocId);
+      if (currentDoc) {
+        currentDoc.title = title;
+        currentDoc.dept = dept;
+        currentDoc.isAutoFormMode = true;
+      }
+
       localStorage.setItem('yewon_auto_title', title);
       localStorage.setItem('yewon_auto_dept', dept);
 
@@ -2184,10 +2518,16 @@
           el.currentFormName.textContent = `${state.pdfTemplate.name} (2열 표 자동 생성본)`;
         }
 
+        if (state.currentDocId) {
+          await saveFileToDB(`template_${state.currentDocId}`, autoPdfBytes, state.pdfTemplate.name);
+        }
         await saveFileToDB('activeTemplate', autoPdfBytes, state.pdfTemplate.name);
-        refreshAdminAndUserPreview();
+
         saveDocumentsList();
         renderDocumentList();
+
+        // [시작], [진행], [완료] 모든 메뉴 미리보기 일괄 갱신
+        await refreshAllAdminPreviews();
 
         if (showAlert) {
           showToast(title ? `✨ "${title}" 2열 표 양식이 성공적으로 생성되어 적용되었습니다!` : '✨ 2열 표 양식이 성공적으로 생성되어 적용되었습니다!');
@@ -2205,7 +2545,7 @@
   // [10-2] 다중 서류 관리 (작성된 서류 목록, 새 문서 생성, 수정, 삭제)
   // ==========================================================================
 
-  // 서류 목록 로컬 로드
+  // 서류 목록 로컬 로드 (서류별 격리)
   function loadDocumentsList() {
     try {
       const raw = localStorage.getItem('yewon_docs_list');
@@ -2217,52 +2557,70 @@
     }
 
     if (!Array.isArray(state.documents) || state.documents.length === 0) {
-      // 기존 단일 문서 데이터를 바탕으로 첫 번째 기본 문서 자동 생성 (임의 제목 없음)
       const defaultDoc = {
         id: 'doc_' + Date.now(),
         title: state.autoFormTitle || '',
         dept: state.autoFormDept || '',
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
-        signers: [...state.signers],
-        signatures: { ...state.signatures },
+        signers: ['홍길동', '김영희', '이철수', '박민수', '정수진'],
+        signatures: {},
         isAutoFormMode: true
       };
       state.documents = [defaultDoc];
       saveDocumentsList();
     }
 
-    if (!state.currentDocId || !state.documents.some(d => d.id === state.currentDocId)) {
+    // 활성 서류 ID 결정
+    const savedDocId = localStorage.getItem('yewon_current_doc_id');
+    if (savedDocId && state.documents.some(d => d.id === savedDocId)) {
+      state.currentDocId = savedDocId;
+    } else if (!state.currentDocId || !state.documents.some(d => d.id === state.currentDocId)) {
       state.currentDocId = state.documents[0].id;
+    }
+
+    state.adminSelectedDocId = state.currentDocId;
+
+    // 현재 활성 서류의 개별 명단과 서명을 state에 완벽히 바인딩
+    const activeDoc = state.documents.find(d => d.id === state.currentDocId) || state.documents[0];
+    if (activeDoc) {
+      state.autoFormTitle = activeDoc.title || '';
+      state.autoFormDept = activeDoc.dept || '';
+      state.signers = Array.isArray(activeDoc.signers) ? [...activeDoc.signers] : [];
+      state.signatures = activeDoc.signatures ? { ...activeDoc.signatures } : {};
+      state.isAutoFormMode = activeDoc.isAutoFormMode !== false;
     }
   }
 
-  // 현재 서류 목록 저장
+  // 현재 서류 목록 저장 (서류별 완벽 격리)
   function saveDocumentsList() {
     try {
       // 현재 활성 문서의 실시간 상태 동기화
       const currentDoc = state.documents.find(d => d.id === state.currentDocId);
       if (currentDoc) {
-        currentDoc.title = state.autoFormTitle || currentDoc.title;
-        currentDoc.dept = state.autoFormDept !== undefined ? state.autoFormDept : currentDoc.dept;
-        currentDoc.signers = [...state.signers];
-        currentDoc.signatures = { ...state.signatures };
-        currentDoc.isAutoFormMode = state.isAutoFormMode;
+        currentDoc.title = (state.autoFormTitle !== undefined) ? state.autoFormTitle : currentDoc.title;
+        currentDoc.dept = (state.autoFormDept !== undefined) ? state.autoFormDept : currentDoc.dept;
+        currentDoc.signers = Array.isArray(state.signers) ? [...state.signers] : (currentDoc.signers || []);
+        currentDoc.signatures = state.signatures ? { ...state.signatures } : (currentDoc.signatures || {});
+        currentDoc.isAutoFormMode = state.isAutoFormMode !== false;
         currentDoc.updatedAt = new Date().toISOString();
       }
 
       // 메타데이터 리스트 로컬스토리지 저장
       const metaList = state.documents.map(d => ({
         id: d.id,
-        title: d.title,
-        dept: d.dept,
+        title: d.title || '',
+        dept: d.dept || '',
         createdAt: d.createdAt,
         updatedAt: d.updatedAt,
-        signers: d.signers || [],
-        signatures: d.signatures || {},
+        signers: Array.isArray(d.signers) ? [...d.signers] : [],
+        signatures: d.signatures ? { ...d.signatures } : {},
         isAutoFormMode: d.isAutoFormMode !== false
       }));
       localStorage.setItem('yewon_docs_list', JSON.stringify(metaList));
+      if (state.currentDocId) {
+        localStorage.setItem('yewon_current_doc_id', state.currentDocId);
+      }
 
       // Realtime Database 클라우드 동기화 (모든 기기 실시간 전달)
       if (rtdb) {
@@ -2277,7 +2635,34 @@
     }
   }
 
-  // 작성된 서류 목록 렌더링 (3개 초과 시 스크롤 처리)
+  // 관리자 모드: 라디오 버튼 클릭으로 특정 서류 선택 시 호출
+  async function selectDocumentInAdmin(docId) {
+    state.adminSelectedDocId = docId;
+
+    // 상세 영역 보이기 & 안내 숨기기
+    if (el.adminDocNoSelectionNotice) el.adminDocNoSelectionNotice.style.display = 'none';
+    if (el.adminDocDetailArea) el.adminDocDetailArea.style.display = 'block';
+
+    // 해당 문서로 데이터 전환 및 [시작], [진행], [완료] 세 메뉴 미리보기 일괄 갱신
+    await switchToDocument(docId);
+
+    // 현재 활성화된 탭 파악 ([시작], [진행], [완료])
+    const activeTab = document.querySelector('.admin-tab-nav .tab-btn.active');
+    const targetTabId = activeTab ? activeTab.getAttribute('data-tab') : 'tab-start';
+
+    // 탭별 추가 상태 동기화
+    if (targetTabId === 'tab-progress') {
+      renderProgressTable();
+      updateDashboardStats();
+    } else if (targetTabId === 'tab-complete') {
+      updateCompleteTabUI();
+    }
+
+    updateActiveDocumentDisplays();
+    renderDocumentList();
+  }
+
+  // 작성된 서류 목록 렌더링 (서류별 지정된 교사 수 및 서명 현황 배지 표기)
   function renderDocumentList() {
     if (!el.docListContainer) return;
     el.docListContainer.innerHTML = '';
@@ -2285,147 +2670,151 @@
 
     if (state.documents.length === 0) {
       el.docListContainer.innerHTML = '<div style="padding: 1.25rem; text-align: center; color: #94a3b8; font-size: 0.9rem;">작성된 서류가 없습니다. 상단 [➕ 새 문서 만들기]를 눌러 새 서류를 작성해 보세요.</div>';
+      if (el.adminDocNoSelectionNotice) el.adminDocNoSelectionNotice.style.display = 'none';
+      if (el.adminDocDetailArea) el.adminDocDetailArea.style.display = 'none';
       return;
     }
 
     state.documents.forEach(doc => {
-      const isActive = doc.id === state.currentDocId;
-      const total = doc.signers ? doc.signers.length : 0;
-      const completed = doc.signatures ? Object.keys(doc.signatures).length : 0;
-      const isCompleted = total > 0 && completed >= total;
-      const isPending = completed === 0;
+      const isSelected = (state.adminSelectedDocId === doc.id);
+      const signersCount = Array.isArray(doc.signers) ? doc.signers.length : 0;
+      const signsCount = doc.signatures ? Object.keys(doc.signatures).length : 0;
+      const isAllDone = signersCount > 0 && signsCount >= signersCount;
 
-      const item = document.createElement('div');
-      item.className = `doc-item ${isActive ? 'active' : ''}`;
-      item.style.cssText = `
-        border: 1.5px solid ${isActive ? '#2563eb' : '#e2e8f0'};
-        background: ${isActive ? '#eff6ff' : '#ffffff'};
-        border-radius: var(--radius-md);
-        padding: 0.75rem 1rem;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 1rem;
-        transition: all 0.15s ease;
+      const row = document.createElement('label');
+      row.className = `doc-radio-row ${isSelected ? 'selected' : ''}`;
+      row.setAttribute('data-id', doc.id);
+
+      row.innerHTML = `
+        <div style="display: flex; align-items: center; gap: 0.75rem; flex: 1; min-width: 0;">
+          <input 
+            type="radio" 
+            name="adminSelectedDocRadio" 
+            value="${doc.id}" 
+            ${isSelected ? 'checked' : ''} 
+            style="width: 1.2rem; height: 1.2rem; cursor: pointer; accent-color: #2563eb; flex-shrink: 0;"
+          >
+          <div style="display: flex; flex-direction: column; min-width: 0; flex: 1;">
+            <span class="doc-title-text" style="font-size: 0.98rem; font-weight: ${isSelected ? '700' : '600'}; color: ${isSelected ? '#1d4ed8' : '#1e293b'}; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+              ${doc.title || '제목 없는 문서'}
+            </span>
+            <div style="display: flex; gap: 0.45rem; align-items: center; margin-top: 0.2rem; flex-wrap: wrap;">
+              <span class="badge" style="font-size: 0.72rem; padding: 0.1rem 0.45rem; background: #eff6ff; color: #2563eb; font-weight: 600;">
+                👥 지정 교사: ${signersCount}명
+              </span>
+              <span class="badge" style="font-size: 0.72rem; padding: 0.1rem 0.45rem; background: ${isAllDone ? '#dcfce7' : '#f1f5f9'}; color: ${isAllDone ? '#166534' : '#475569'}; font-weight: 600;">
+                ✍️ 서명: ${signsCount}/${signersCount}명
+              </span>
+            </div>
+          </div>
+        </div>
+        <button type="button" class="btn-delete-doc" data-id="${doc.id}" title="서류 삭제">
+          🗑️ 삭제
+        </button>
       `;
 
-      let statusBadge = '';
-      if (isCompleted) {
-        statusBadge = `<span class="badge badge-success" style="font-size: 0.75rem; padding: 0.2rem 0.5rem;">✓ 서명 완료 (${completed}/${total}명)</span>`;
-      } else if (isPending) {
-        statusBadge = `<span class="badge badge-pending" style="font-size: 0.75rem; padding: 0.2rem 0.5rem;">대기 중 (0/${total}명)</span>`;
-      } else {
-        statusBadge = `<span class="badge" style="background: #e0f2fe; color: #0369a1; border: 1px solid #bae6fd; font-size: 0.75rem; padding: 0.2rem 0.5rem;">⏳ 진행 중 (${completed}/${total}명)</span>`;
+      // 라디오 버튼 및 행 클릭 이벤트 (클릭 시 해당 서류 내용 표시)
+      row.addEventListener('click', (e) => {
+        if (e.target.closest('.btn-delete-doc')) return;
+        if (e.target.tagName && e.target.tagName.toLowerCase() === 'input') return; // input 이벤트와 중복 방지
+        selectDocumentInAdmin(doc.id);
+      });
+
+      const radio = row.querySelector('input[type="radio"]');
+      if (radio) {
+        radio.addEventListener('change', () => {
+          selectDocumentInAdmin(doc.id);
+        });
       }
 
-      const updatedDate = doc.updatedAt ? new Date(doc.updatedAt).toLocaleDateString('ko-KR') : '';
+      // 삭제 버튼 이벤트
+      const deleteBtn = row.querySelector('.btn-delete-doc');
+      if (deleteBtn) {
+        deleteBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          const id = doc.id;
+          const title = doc.title || '선택한 서류';
+          if (confirm(`"${title}" 서류를 삭제하시겠습니까?\n(등록된 대상자 및 서명 데이터도 함께 삭제됩니다)`)) {
+            deleteDocument(id);
+          }
+        });
+      }
 
-      item.innerHTML = `
-        <div style="flex: 1; min-width: 0; cursor: pointer;" class="doc-item-click-area" data-id="${doc.id}">
-          <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.25rem;">
-            <strong style="font-size: 0.95rem; color: #0f172a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 320px;">
-              ${doc.title || '제목 없는 문서'}
-            </strong>
-            ${statusBadge}
-            ${isActive ? '<span style="font-size: 0.7rem; background: #2563eb; color: white; padding: 0.15rem 0.4rem; border-radius: 4px; font-weight: 700;">작업 중</span>' : ''}
-          </div>
-          <div style="font-size: 0.8rem; color: #64748b; display: flex; gap: 0.75rem; flex-wrap: wrap;">
-            <span>🏢 ${doc.dept || '(부서/담당자 미지정)'}</span>
-            <span>📅 ${updatedDate}</span>
-          </div>
-        </div>
-        <div style="display: flex; gap: 0.4rem; flex-shrink: 0;">
-          <button type="button" class="nav-link-btn primary btn-edit-doc" data-id="${doc.id}" style="font-size: 0.8rem; padding: 0.35rem 0.7rem; font-weight: 700;">
-            ✏️ 수정
-          </button>
-          <button type="button" class="nav-link-btn danger btn-delete-doc" data-id="${doc.id}" style="font-size: 0.8rem; padding: 0.35rem 0.7rem;">
-            🗑️ 삭제
-          </button>
-        </div>
-      `;
-      el.docListContainer.appendChild(item);
-    });
-
-    // [수정] 버튼 및 카드 클릭 이벤트 바인딩
-    el.docListContainer.querySelectorAll('.btn-edit-doc, .doc-item-click-area').forEach(element => {
-      element.addEventListener('click', (e) => {
-        const id = element.getAttribute('data-id') || element.closest('.doc-item').querySelector('.btn-edit-doc').getAttribute('data-id');
-        switchToDocument(id);
-        const startTabBtn = document.querySelector('.tab-btn[data-tab="tab-start"]');
-        if (startTabBtn) startTabBtn.click();
-      });
-    });
-
-    // [삭제] 버튼 이벤트 바인딩
-    el.docListContainer.querySelectorAll('.btn-delete-doc').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const id = btn.getAttribute('data-id');
-        const doc = state.documents.find(d => d.id === id);
-        const title = doc ? doc.title : '선택한 서류';
-        if (confirm(`"${title}" 서류를 삭제하시겠습니까?\n(등록된 대상자 및 서명 데이터도 함께 삭제됩니다)`)) {
-          deleteDocument(id);
-        }
-      });
+      el.docListContainer.appendChild(row);
     });
   }
 
-  // 새 문서 만들기 (상단 [새 문서 만들기] 클릭 시)
+  // 새 문서 만들기 (상단 [➕ 새 문서 만들기] 클릭 시)
   async function createNewDocument() {
     saveDocumentsList(); // 기존 작업 저장
 
     const newDocId = 'doc_' + Date.now();
     const now = new Date();
-    const defaultTitle = ''; // 제목을 임의로 만들지 않고 빈칸으로 설정
-    const defaultDept = '';  // 부서명도 빈칸으로 설정
 
     const newDoc = {
       id: newDocId,
-      title: defaultTitle,
-      dept: defaultDept,
+      title: '',
+      dept: '',
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
-      signers: ['홍길동', '김영희', '이철수', '박민수', '정수진'],
+      signers: [], // 새 문서는 다른 문서와 혼동되지 않도록 고유한 빈 명단으로 시작
       signatures: {},
       isAutoFormMode: true
     };
 
     state.documents.unshift(newDoc); // 목록 최상단에 추가
-    saveDocumentsList();
-    await switchToDocument(newDocId);
+    state.currentDocId = newDocId;
+    state.adminSelectedDocId = newDocId;
+    state.autoFormTitle = '';
+    state.autoFormDept = '';
+    state.signers = [];
+    state.signatures = {};
+    state.isAutoFormMode = true;
 
-    // [시작] 탭으로 전환
-    const startTabBtn = document.querySelector('.tab-btn[data-tab="tab-start"]');
-    if (startTabBtn) startTabBtn.click();
+    saveDocumentsList();
+
+    // 새 문서를 라디오 버튼 선택 상태로 지정하여 내용 즉시 표시
+    await selectDocumentInAdmin(newDocId);
 
     // 제목 입력란 포커스
     if (el.autoFormTitle) {
+      el.autoFormTitle.value = '';
       el.autoFormTitle.focus();
-      el.autoFormTitle.select();
     }
 
-    showToast('✨ 새 서류가 생성되었습니다. 제목과 명단을 작성해 주세요.');
+    showToast('✨ 새 서류가 생성되었습니다. 이 서류에 지정할 선생님 성명을 등록해 주세요.');
   }
 
   // 특정 서류로 작업 전환
   async function switchToDocument(docId) {
-    saveDocumentsList(); // 이전 문서 저장
+    if (!docId) return;
+    if (state.currentDocId && state.currentDocId !== docId) {
+      saveDocumentsList(); // 이전 문서 저장
+    }
 
     const doc = state.documents.find(d => d.id === docId);
     if (!doc) return;
 
     state.currentDocId = docId;
+    state.adminSelectedDocId = docId;
     state.autoFormTitle = doc.title || '';
     state.autoFormDept = doc.dept || '';
+    // 각 서류마다 지정된 고유 선생님 명단과 서명 완벽 격리 로드
     state.signers = Array.isArray(doc.signers) ? [...doc.signers] : [];
     state.signatures = doc.signatures ? { ...doc.signatures } : {};
-    state.isAutoFormMode = doc.isAutoFormMode !== false;
+    
+    // 업로드된 전용 PDF가 저장되어 있지 않다면 기본적으로 자동 표 양식 모드 적용
+    let uploadedTemplate = await getFileFromDB(`template_${docId}`);
+    if (doc.isAutoFormMode === false && uploadedTemplate && uploadedTemplate.data) {
+      state.isAutoFormMode = false;
+    } else {
+      state.isAutoFormMode = true;
+      doc.isAutoFormMode = true;
+    }
     state.cachedUnifiedPdfBytes = null;
 
-    localStorage.setItem('yewon_auto_title', state.autoFormTitle);
-    localStorage.setItem('yewon_auto_dept', state.autoFormDept);
-    localStorage.setItem('yewon_signers', JSON.stringify(state.signers));
-    saveLocalSettings();
+    localStorage.setItem('yewon_current_doc_id', docId);
 
     // UI 입력창 반영
     if (el.autoFormTitle) el.autoFormTitle.value = state.autoFormTitle;
@@ -2438,28 +2827,41 @@
       if (el.sectionAutoForm) el.sectionAutoForm.style.display = 'block';
       if (el.sectionUploadPdf) el.sectionUploadPdf.style.display = 'none';
 
-      // 2열 표 양식 자동 생성 및 바인딩
+      // 해당 서류의 제목과 교사 명단으로 2열 표 양식 자동 생성
       const autoBytes = await generateAutoTablePdf(state.autoFormTitle, state.autoFormDept, state.signers);
-      state.pdfTemplate.name = `${state.autoFormTitle}.pdf`;
+      state.pdfTemplate.name = `${state.autoFormTitle || '서명 양식'}.pdf`;
       state.pdfTemplate.bytes = autoBytes;
     } else {
       if (el.btnModeUploadPdf) el.btnModeUploadPdf.classList.add('primary');
       if (el.btnModeAutoForm) el.btnModeAutoForm.classList.remove('primary');
       if (el.sectionAutoForm) el.sectionAutoForm.style.display = 'none';
       if (el.sectionUploadPdf) el.sectionUploadPdf.style.display = 'block';
+
+      if (uploadedTemplate && uploadedTemplate.data) {
+        state.pdfTemplate.name = uploadedTemplate.name || `${state.autoFormTitle || '서명 양식'}.pdf`;
+        state.pdfTemplate.bytes = uploadedTemplate.data;
+      } else {
+        state.isAutoFormMode = true;
+        doc.isAutoFormMode = true;
+        const autoBytes = await generateAutoTablePdf(state.autoFormTitle, state.autoFormDept, state.signers);
+        state.pdfTemplate.name = `${state.autoFormTitle || '서명 양식'}.pdf`;
+        state.pdfTemplate.bytes = autoBytes;
+      }
     }
 
     if (el.currentFormName) {
       el.currentFormName.textContent = state.pdfTemplate.name;
     }
 
+    updateActiveDocumentDisplays();
     renderDocumentList();
     renderSignerTags();
     renderProgressTable();
     renderCompleteTable();
     updateDashboardStats();
-    updateCompleteTabUI();
-    refreshAdminAndUserPreview();
+
+    // [시작], [진행], [완료] 세 메뉴의 미리보기를 한꺼번에 일괄 갱신
+    await refreshAllAdminPreviews();
   }
 
   // 서류 삭제
@@ -2469,18 +2871,14 @@
 
     state.documents.splice(idx, 1);
 
-    if (state.documents.length === 0) {
-      // 모두 삭제된 경우 새 기본 문서 생성
-      await createNewDocument();
-    } else {
-      if (state.currentDocId === docId) {
-        // 현재 활성 문서를 삭제한 경우 첫 번째 문서로 전환
-        await switchToDocument(state.documents[0].id);
-      } else {
-        saveDocumentsList();
-        renderDocumentList();
-      }
+    if (state.adminSelectedDocId === docId) {
+      state.adminSelectedDocId = null;
+      if (el.adminDocNoSelectionNotice) el.adminDocNoSelectionNotice.style.display = 'block';
+      if (el.adminDocDetailArea) el.adminDocDetailArea.style.display = 'none';
     }
+
+    saveDocumentsList();
+    renderDocumentList();
     showToast('🗑️ 서류가 삭제되었습니다.');
   }
 
@@ -2496,7 +2894,7 @@
     el.signerCountBadge.textContent = state.signers.length;
 
     if (state.signers.length === 0) {
-      el.signerTagsList.innerHTML = '<span style="color: #94a3b8; font-size: 0.85rem;">등록된 서명 대상자가 없습니다. 상단에서 선생님 성명을 추가해 주세요.</span>';
+      el.signerTagsList.innerHTML = '<span style="color: #94a3b8; font-size: 0.85rem;">등록된 서명 대상자가 없습니다. 상단에서 선생님 성명을 추가해 주세요. (현재 서류 전용)</span>';
       return;
     }
 
@@ -2512,26 +2910,28 @@
 
     // 삭제 버튼 이벤트 바인딩
     el.signerTagsList.querySelectorAll('.remove-signer-btn').forEach(btn => {
-      btn.addEventListener('click', (e) => {
+      btn.addEventListener('click', async (e) => {
         const index = parseInt(e.currentTarget.getAttribute('data-index'), 10);
         state.signers.splice(index, 1);
-        saveLocalSettings();
+        
+        // 현재 서류에 변경 즉시 동기화 및 저장
+        const curDoc = state.documents.find(d => d.id === state.currentDocId);
+        if (curDoc) curDoc.signers = [...state.signers];
+        saveDocumentsList();
+
         renderSignerTags();
         renderProgressTable();
         updateDashboardStats();
-        // 자동 양식 모드일 경우 명단 변경에 맞춰 실시간으로 표 양식 갱신
-        if (state.isAutoFormMode) {
-          applyAutoFormTemplate(false);
-        } else {
-          saveDocumentsList();
-          renderDocumentList();
-        }
+        renderDocumentList();
+
+        // [시작], [진행], [완료] 세 메뉴의 미리보기에 대상자 삭제 즉시 반영
+        await refreshAllAdminPreviews();
       });
     });
   }
 
-  // 대상자 추가
-  function handleAddSigners() {
+  // 대상자 추가 (현재 서류 전용)
+  async function handleAddSigners() {
     const rawInput = el.newSignerInput.value.trim();
     if (!rawInput) return;
 
@@ -2552,40 +2952,41 @@
     });
 
     if (addedCount > 0) {
-      saveLocalSettings();
+      // 현재 서류에 변경 즉시 동기화 및 저장
+      const curDoc = state.documents.find(d => d.id === state.currentDocId);
+      if (curDoc) curDoc.signers = [...state.signers];
+      saveDocumentsList();
+
       renderSignerTags();
       renderProgressTable();
       updateDashboardStats();
+      renderDocumentList();
       el.newSignerInput.value = '';
-      showToast(`${addedCount}명의 선생님이 등록되었습니다.`);
+      showToast(`${addedCount}명의 선생님이 등록되었습니다. (현재 서류 지정)`);
 
-      // 자동 양식 모드일 경우 명단 추가에 맞춰 2열 표 양식 자동 재계산 및 갱신
-      if (state.isAutoFormMode) {
-        applyAutoFormTemplate(false);
-      } else {
-        saveDocumentsList();
-        renderDocumentList();
-      }
+      // [시작], [진행], [완료] 세 메뉴의 미리보기에 대상자 추가 즉시 반영
+      await refreshAllAdminPreviews();
     } else {
       showToast('이미 등록되어 있거나 유효하지 않은 이름입니다.');
     }
   }
 
-  // 전체 대상자 비우기
-  function handleClearAllSigners() {
-    if (confirm('등록된 대상자 명단을 모두 비우시겠습니까?')) {
+  // 전체 대상자 비우기 (현재 서류 전용)
+  async function handleClearAllSigners() {
+    if (confirm('현재 선택된 서류의 대상자 명단을 모두 비우시겠습니까?')) {
       state.signers = [];
-      saveLocalSettings();
+      const curDoc = state.documents.find(d => d.id === state.currentDocId);
+      if (curDoc) curDoc.signers = [];
+      saveDocumentsList();
+
       renderSignerTags();
       renderProgressTable();
       updateDashboardStats();
-      showToast('대상자 명단이 비워졌습니다.');
-      if (state.isAutoFormMode) {
-        applyAutoFormTemplate(false);
-      } else {
-        saveDocumentsList();
-        renderDocumentList();
-      }
+      renderDocumentList();
+      showToast('현재 서류의 대상자 명단이 비워졌습니다.');
+      
+      // [시작], [진행], [완료] 세 메뉴의 미리보기에 즉시 반영
+      await refreshAllAdminPreviews();
     }
   }
 
@@ -3132,18 +3533,70 @@
     if (el.btnGenerateAutoForm) {
       el.btnGenerateAutoForm.addEventListener('click', () => applyAutoFormTemplate(true));
     }
+
+    let titleDebounceTimer = null;
     if (el.autoFormTitle) {
       el.autoFormTitle.value = state.autoFormTitle || '';
-      el.autoFormTitle.addEventListener('change', () => applyAutoFormTemplate(false));
-      el.autoFormTitle.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') applyAutoFormTemplate(true);
+      el.autoFormTitle.addEventListener('input', () => {
+        const title = el.autoFormTitle.value;
+        state.autoFormTitle = title;
+        const currentDoc = state.documents.find(d => d.id === state.currentDocId);
+        if (currentDoc) {
+          currentDoc.title = title;
+        }
+        updateActiveDocumentDisplays();
+        const titleEl = el.docListContainer ? el.docListContainer.querySelector(`.doc-radio-row[data-id="${state.currentDocId}"] .doc-title-text`) : null;
+        if (titleEl) {
+          titleEl.textContent = title.trim() || '제목 없는 문서';
+        }
+
+        // 실시간 디바운스 갱신: [시작], [진행], [완료] 세 메뉴의 미리보기에 제목 즉시 반영
+        clearTimeout(titleDebounceTimer);
+        titleDebounceTimer = setTimeout(async () => {
+          saveDocumentsList();
+          await refreshAllAdminPreviews();
+        }, 200);
+      });
+      el.autoFormTitle.addEventListener('change', async () => {
+        clearTimeout(titleDebounceTimer);
+        await applyAutoFormTemplate(false);
+      });
+      el.autoFormTitle.addEventListener('keydown', async (e) => {
+        if (e.key === 'Enter') {
+          clearTimeout(titleDebounceTimer);
+          await applyAutoFormTemplate(true);
+        }
       });
     }
+
+    let deptDebounceTimer = null;
     if (el.autoFormDept) {
       el.autoFormDept.value = state.autoFormDept || '';
-      el.autoFormDept.addEventListener('change', () => applyAutoFormTemplate(false));
-      el.autoFormDept.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') applyAutoFormTemplate(true);
+      el.autoFormDept.addEventListener('input', () => {
+        const dept = el.autoFormDept.value;
+        state.autoFormDept = dept;
+        const currentDoc = state.documents.find(d => d.id === state.currentDocId);
+        if (currentDoc) {
+          currentDoc.dept = dept;
+        }
+        updateActiveDocumentDisplays();
+
+        // 실시간 디바운스 갱신: [시작], [진행], [완료] 세 메뉴의 미리보기에 부서/담당자 즉시 반영
+        clearTimeout(deptDebounceTimer);
+        deptDebounceTimer = setTimeout(async () => {
+          saveDocumentsList();
+          await refreshAllAdminPreviews();
+        }, 200);
+      });
+      el.autoFormDept.addEventListener('change', async () => {
+        clearTimeout(deptDebounceTimer);
+        await applyAutoFormTemplate(false);
+      });
+      el.autoFormDept.addEventListener('keydown', async (e) => {
+        if (e.key === 'Enter') {
+          clearTimeout(deptDebounceTimer);
+          await applyAutoFormTemplate(true);
+        }
       });
     }
 
@@ -3254,7 +3707,14 @@
       el.btnRefreshProgress.addEventListener('click', () => {
         renderProgressTable();
         updateDashboardStats();
-        showToast('🔄 서명 현황이 새로고침되었습니다.');
+        renderProgressDocView();
+        showToast('🔄 서명 현황 및 서류 미리보기가 새로고침되었습니다.');
+      });
+    }
+    if (el.btnRefreshProgressDoc) {
+      el.btnRefreshProgressDoc.addEventListener('click', () => {
+        renderProgressDocView();
+        showToast('🔄 서류 미리보기가 새로고침되었습니다.');
       });
     }
 
@@ -3297,12 +3757,51 @@
       });
     }
     if (el.btnReenterName) el.btnReenterName.addEventListener('click', handleReenterName);
+    if (el.btnBackToNameStep) el.btnBackToNameStep.addEventListener('click', handleReenterName);
+    if (el.btnBackToDocList) {
+      el.btnBackToDocList.addEventListener('click', () => {
+        if (state.currentSignerName) {
+          const assignedDocs = getAssignedDocsForTeacher(state.currentSignerName);
+          if (assignedDocs.length > 1) {
+            showUserDocSelectStep(state.currentSignerName, assignedDocs);
+          } else {
+            handleReenterName();
+          }
+        } else {
+          handleReenterName();
+        }
+      });
+    }
 
     // 요구사항 버튼 2개: [다시 하기], [제출]
     if (el.btnResetSign) el.btnResetSign.addEventListener('click', clearSignatureCanvas);
     if (el.btnSubmitSign) el.btnSubmitSign.addEventListener('click', handleSubmitSignature);
 
     // 완료 화면
+    if (el.btnNextAssignedDoc) {
+      el.btnNextAssignedDoc.addEventListener('click', async () => {
+        if (state.currentSignerName) {
+          const assignedDocs = getAssignedDocsForTeacher(state.currentSignerName);
+          const nextPending = assignedDocs.find(d => !d.signatures || !d.signatures[state.currentSignerName]);
+          if (nextPending) {
+            await switchToDocument(nextPending.id);
+            proceedToSigningStep(state.currentSignerName, nextPending);
+          } else {
+            showUserDocSelectStep(state.currentSignerName, assignedDocs);
+          }
+        }
+      });
+    }
+    if (el.btnReturnToDocList) {
+      el.btnReturnToDocList.addEventListener('click', () => {
+        if (state.currentSignerName) {
+          const assignedDocs = getAssignedDocsForTeacher(state.currentSignerName);
+          showUserDocSelectStep(state.currentSignerName, assignedDocs);
+        } else {
+          handleRestartUserFlow();
+        }
+      });
+    }
     if (el.btnDownloadMySignedPdf) el.btnDownloadMySignedPdf.addEventListener('click', handleDownloadMySignedPdf);
     if (el.btnRestartUserFlow) el.btnRestartUserFlow.addEventListener('click', handleRestartUserFlow);
 
@@ -3334,12 +3833,16 @@
     setupEventListeners();
     loadLocalSettings();
     loadDocumentsList();
-    renderDocumentList();
-    renderSignerTags();
-    renderProgressTable();
-    renderCompleteTable();
-    updateDashboardStats();
-    syncConfigInputs();
+    if (state.currentDocId) {
+      await switchToDocument(state.currentDocId);
+    } else {
+      renderDocumentList();
+      renderSignerTags();
+      renderProgressTable();
+      renderCompleteTable();
+      updateDashboardStats();
+      syncConfigInputs();
+    }
 
     // 2. 관리자 세션 복원 (새로고침 시 유지)
     try {
@@ -3355,43 +3858,49 @@
       initFirebase();
       await initDB();
 
-      // 저장된 양식 파일 불러오기
-      const savedTemplate = await getFileFromDB('activeTemplate');
-      if (savedTemplate && savedTemplate.data) {
-        state.pdfTemplate.name = savedTemplate.name || '등록된 양식.pdf';
-        state.pdfTemplate.bytes = savedTemplate.data;
-        if (el.currentFormName) el.currentFormName.textContent = state.pdfTemplate.name;
-
-        // 자동 양식인 경우 사전 좌표 계산 복원
-        if (state.pdfTemplate.name.includes('자동 생성') || state.pdfTemplate.name.includes('서약서')) {
-          state.isAutoFormMode = true;
-          await generateAutoTablePdf(state.autoFormTitle, state.autoFormDept, state.signers);
-        } else {
-          state.isAutoFormMode = false;
-        }
+      // 현재 선택된 서류의 상태 재검증 및 최신 표 양식 보장
+      const curDoc = state.documents.find(d => d.id === state.currentDocId);
+      if (curDoc && curDoc.isAutoFormMode !== false) {
+        state.isAutoFormMode = true;
+        const autoBytes = await generateAutoTablePdf(state.autoFormTitle, state.autoFormDept, state.signers);
+        state.pdfTemplate.name = `${state.autoFormTitle || '서명 양식'}.pdf`;
+        state.pdfTemplate.bytes = autoBytes;
+        state.cachedUnifiedPdfBytes = null;
+        if (el.currentFormName) el.currentFormName.textContent = `${state.pdfTemplate.name} (2열 표 자동 생성본)`;
       } else {
-        // 기본 표 양식 자동 생성 (2열 표 구조)
-        const defaultBytes = await generateDefaultPdfTemplate();
-        if (defaultBytes) {
+        const savedTemplate = (state.currentDocId ? await getFileFromDB(`template_${state.currentDocId}`) : null) || await getFileFromDB('activeTemplate');
+        if (savedTemplate && savedTemplate.data) {
+          state.pdfTemplate.name = savedTemplate.name || '등록된 양식.pdf';
+          state.pdfTemplate.bytes = savedTemplate.data;
+          state.isAutoFormMode = false;
+          if (el.currentFormName) el.currentFormName.textContent = state.pdfTemplate.name;
+        } else {
+          state.isAutoFormMode = true;
+          const autoBytes = await generateAutoTablePdf(state.autoFormTitle, state.autoFormDept, state.signers);
           state.pdfTemplate.name = `${state.autoFormTitle || '서명 양식'}.pdf`;
-          state.pdfTemplate.bytes = defaultBytes;
+          state.pdfTemplate.bytes = autoBytes;
+          state.cachedUnifiedPdfBytes = null;
           if (el.currentFormName) el.currentFormName.textContent = `${state.pdfTemplate.name} (2열 표 자동 생성본)`;
-          await saveFileToDB('activeTemplate', defaultBytes, state.pdfTemplate.name);
         }
       }
 
-      // 저장된 서명 레코드들 불러오기
+      // 저장된 서명 레코드들 불러오기 (현재 활성 서류에 해당하는 서명만 필터링)
       const savedSignatures = await getAllSignaturesFromDB();
       savedSignatures.forEach(rec => {
-        state.signatures[rec.name] = rec;
+        if (!rec.docId || rec.docId === state.currentDocId) {
+          state.signatures[rec.name] = rec;
+        }
       });
 
       renderProgressTable();
       renderCompleteTable();
       updateCompleteTabUI();
       updateDashboardStats();
-      refreshAdminAndUserPreview();
       renderDocumentList();
+      updateActiveDocumentDisplays();
+      
+      // [시작], [진행], [완료] 세 메뉴의 미리보기를 최신 서류 기준으로 일괄 갱신
+      await refreshAllAdminPreviews();
     } catch (dbErr) {
       console.warn('Bootstrap background storage load skipped:', dbErr);
     }
