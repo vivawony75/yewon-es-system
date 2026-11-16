@@ -191,13 +191,18 @@
             <button type="button" id="btnAddSigners" class="btn-primary" style="white-space: nowrap;">선생님 추가</button>
           </div>
 
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; flex-wrap: wrap; gap: 0.5rem;">
             <span style="font-size: 0.9rem; font-weight: 700; color: var(--gray-700);">
-              등록된 대상자 (<span id="signerCountBadge">5</span>명)
+              등록된 대상자 (<span id="signerCountBadge">0</span>명)
             </span>
-            <button type="button" id="btnClearAllSigners" class="nav-link-btn" style="color: var(--danger); border-color: #fecaca;">
-              전체 비우기
-            </button>
+            <div style="display: flex; gap: 0.4rem;">
+              <button type="button" id="btnRestoreOfficialOrder" class="nav-link-btn" style="color: var(--primary); border-color: var(--primary-border); background: var(--primary-light); font-weight: 700;" title="2026학년도 체험교실 출근부 원본 1번~39번 정순서로 즉시 복구 및 재정렬합니다">
+                🔄 출근부 정순서(1~39번)로 복구
+              </button>
+              <button type="button" id="btnClearAllSigners" class="nav-link-btn" style="color: var(--danger); border-color: #fecaca;">
+                전체 비우기
+              </button>
+            </div>
           </div>
 
           <div class="signer-tags" id="signerTagsList">
@@ -295,7 +300,10 @@
               <div class="card-title" style="margin-bottom: 0.2rem;">📋 실시간 서명 현황 게시판</div>
               <p class="card-desc" style="margin-bottom: 0;">선생님들의 서명 작성 내용 및 일시가 실시간으로 반영됩니다.</p>
             </div>
-            <div style="display: flex; gap: 0.5rem;">
+            <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+              <button type="button" id="btnBulkFillSignatures" class="nav-link-btn" style="background: #2563eb; color: #fff; font-weight: 700; border-color: #1d4ed8;">
+                ✍️ 39명 전원 서명 일괄 복구/채우기
+              </button>
               <button type="button" id="btnCopyUserSignLink" class="nav-link-btn primary">
                 🔗 사용자 서명 링크 복사
               </button>
@@ -385,6 +393,9 @@
               </p>
             </div>
             <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+              <button type="button" id="btnBulkFillSignaturesComplete" class="btn-primary" style="background: #2563eb; padding: 0.6rem 1.2rem; font-size: 0.95rem; font-weight: 700;">
+                ✍️ 39명 전원 서명 일괄 채우기/복구
+              </button>
               <button type="button" id="btnPrintUnifiedPdf" class="btn-print" style="padding: 0.6rem 1.2rem; font-size: 0.95rem;">
                 🖨️ 통합 서명본 즉시 인쇄(출력)
               </button>
