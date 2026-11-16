@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>예원 전자서명 시스템</title>
-  <link rel="stylesheet" href="styles.css?v=20261115_1225">
+  <link rel="stylesheet" href="styles.css?v=20261113_1515">
   
   <!-- PDF.js & pdf-lib CDN for browser-based PDF processing -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -80,23 +80,6 @@
         </div>
       </div>
 
-      <!-- 1.5단계: 배정된 다중 서류 선택 화면 -->
-      <div class="card user-box" id="userDocSelectStep" style="display: none; max-width: 580px;">
-        <div class="welcome-icon-box" style="background: #eff6ff; color: #2563eb;">📂</div>
-        <h2 id="userDocSelectGreeting">선생님 반갑습니다</h2>
-        <p>선생님께 지정된 서류 목록입니다. 서명하실 서류를 선택해 주세요.</p>
-        
-        <div id="userAssignedDocList" style="display: flex; flex-direction: column; gap: 0.65rem; margin-top: 1.25rem; text-align: left;">
-          <!-- 서류 목록 동적 렌더링 -->
-        </div>
-
-        <div style="margin-top: 1.5rem; text-align: center;">
-          <button type="button" class="btn-secondary" id="btnBackToNameStep" style="padding: 0.6rem 1.2rem; font-size: 0.9rem;">
-            ← 이름 다시 입력
-          </button>
-        </div>
-      </div>
-
       <!-- 2단계: 선생님 환영 & 서명란 제시 (요구사항: “000 선생님 반갑습니다” 표기 및 서명란 제시) -->
       <div class="signing-view" id="userSigningStep">
         
@@ -104,15 +87,9 @@
         <div class="teacher-greeting-card">
           <div class="greeting-text-box">
             <h3 id="teacherGreetingTitle">홍길동 선생님 반갑습니다</h3>
-            <div id="userSigningDocBadge" style="display: inline-flex; align-items: center; gap: 0.35rem; margin-top: 0.4rem; padding: 0.25rem 0.65rem; background: #2563eb; color: #ffffff; border-radius: 9999px; font-size: 0.82rem; font-weight: 700;">
-              📄 서명 대상: <span id="userSigningDocTitle">서류명</span>
-            </div>
-            <p style="margin-top: 0.35rem;">아래 서명란에 정자 또는 필기체로 서명해 주세요.</p>
+            <p>아래 서명란에 정자 또는 필기체로 서명해 주세요.</p>
           </div>
-          <div style="display: flex; flex-direction: column; gap: 0.4rem; align-items: flex-end;">
-            <button type="button" class="change-name-btn" id="btnBackToDocList" style="display: none; background: #3b82f6; color: white;">📂 다른 서류 선택</button>
-            <button type="button" class="change-name-btn" id="btnReenterName">이름 다시 입력</button>
-          </div>
+          <button type="button" class="change-name-btn" id="btnReenterName">이름 다시 입력</button>
         </div>
 
         <!-- 서명란 (Canvas 패드) - 미리보기와 내려받기는 관리자 메뉴로만 분리 -->
@@ -145,15 +122,8 @@
         <div class="welcome-icon-box" style="background: var(--success-light); color: var(--success);">🎉</div>
         <h2>서명이 정상적으로 제출되었습니다</h2>
         <p><strong id="completedTeacherName">홍길동</strong> 선생님의 서명이 제출되었습니다. 감사합니다.</p>
-        <p id="completedDocTitleDisplay" style="font-size: 0.92rem; color: #1d4ed8; font-weight: 700; margin-top: 0.35rem;"></p>
         
-        <div id="userCompleteActionButtons" style="display: flex; gap: 0.75rem; justify-content: center; margin-top: 1.5rem; flex-wrap: wrap;">
-          <button type="button" id="btnNextAssignedDoc" class="btn-primary" style="display: none; background: #2563eb;">
-            다음 대기 서류 서명하기
-          </button>
-          <button type="button" id="btnReturnToDocList" class="btn-secondary" style="display: none;">
-            서류 목록으로
-          </button>
+        <div style="display: flex; gap: 0.75rem; justify-content: center; margin-top: 1.5rem;">
           <button type="button" id="btnRestartUserFlow" class="btn-primary">
             확인 (첫 화면으로)
           </button>
@@ -167,137 +137,42 @@
     <!-- ============================================== -->
     <section id="adminViewSection" style="display: none;">
       
-      <!-- [1] 관리자 모드: 작성된 서류 목록 (제목 & 라디오 버튼만 표시) -->
-      <div class="card doc-list-card" style="margin-bottom: 1.25rem; padding: 1.1rem 1.25rem; background: #ffffff; border: 1.5px solid var(--gray-200); border-radius: var(--radius-md); box-shadow: var(--shadow-sm);">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; flex-wrap: wrap; gap: 0.5rem;">
-          <div style="font-weight: 800; font-size: 1.05rem; color: var(--gray-900); display: flex; align-items: center; gap: 0.5rem;">
-            📑 작성된 서류 목록
-            <span id="docCountBadge" class="badge badge-pending" style="font-size: 0.75rem; padding: 0.2rem 0.55rem;">0건</span>
-          </div>
-          <button type="button" id="btnCreateNewDoc" class="tab-btn-create" style="background: linear-gradient(135deg, #10b981, #059669); color: white; border: none; border-radius: var(--radius-md); padding: 0.55rem 1rem; font-size: 0.88rem; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 0.35rem; white-space: nowrap; box-shadow: 0 2px 4px rgba(16, 185, 129, 0.25); transition: all 0.15s ease;">
-            ➕ 새 문서 만들기
-          </button>
-        </div>
-
-        <p style="font-size: 0.82rem; color: var(--gray-500); margin-bottom: 0.75rem; margin-top: -0.2rem;">
-          💡 확인하거나 편집하실 <strong>서류 제목 앞의 라디오 버튼(🔘)</strong>을 클릭하면 해당 서류의 내용(교사 이름 지정, 양식 미리보기, 서명 현황 등)이 아래에 표시됩니다.
-        </p>
-        
-        <!-- 3개 초과 시 스크롤 처리 컨테이너 (서류 제목 & 라디오 버튼 목록) -->
-        <div id="docListContainer" class="doc-list-scrollable" style="max-height: 240px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.45rem; padding-right: 4px;">
-          <!-- 자바스크립트로 서류 제목 + 라디오 버튼이 렌더링됩니다 -->
-        </div>
-      </div>
-
-      <!-- 서류 미선택 시 안내 영역 -->
-      <div id="adminDocNoSelectionNotice" class="card" style="text-align: center; padding: 3rem 1.5rem; background: #f8fafc; border: 1.5px dashed var(--gray-300); border-radius: var(--radius-md); color: var(--gray-500); margin-bottom: 1.5rem;">
-        <div style="font-size: 2.2rem; margin-bottom: 0.6rem;">🔘</div>
-        <div style="font-size: 1.05rem; font-weight: 700; color: var(--gray-800); margin-bottom: 0.35rem;">
-          서류 제목 앞의 라디오 버튼을 클릭해 주세요
-        </div>
-        <p style="font-size: 0.88rem; color: var(--gray-500); margin: 0; line-height: 1.6;">
-          위 서류 목록에서 서류를 선택하시면<br>
-          해당 서류에 대한 <strong>교사 이름 지정, 양식 미리보기, 실시간 서명 현황</strong> 등 상세 내용이 표시됩니다.
-        </p>
-      </div>
-
-      <!-- [2] 선택된 서류의 상세 내용 영역 (라디오 버튼 클릭 시 표시) -->
-      <div id="adminDocDetailArea" style="display: none;">
-
-        <!-- 현재 선택된 서류 표시 바 -->
-        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; background: #eff6ff; border: 1.5px solid #bfdbfe; border-radius: var(--radius-md); padding: 0.75rem 1.15rem; flex-wrap: wrap; gap: 0.5rem;">
-          <div style="display: flex; align-items: center; gap: 0.6rem;">
-            <span style="font-size: 0.82rem; font-weight: 700; color: #2563eb; background: #dbeafe; padding: 0.2rem 0.55rem; border-radius: 4px;">선택된 서류</span>
-            <span id="selectedDocBannerTitle" style="font-size: 1.05rem; font-weight: 800; color: #1e293b;"></span>
-          </div>
-          <span style="font-size: 0.8rem; color: #64748b;">💡 교사 명단 지정 및 양식 미리보기를 관리할 수 있습니다.</span>
-        </div>
-
-        <!-- 상단 탭 네비게이션: [시작], [진행], [완료] -->
-        <nav class="admin-tab-nav" style="display: flex; gap: 0.5rem; align-items: stretch; margin-bottom: 1.25rem;">
-          <button type="button" class="tab-btn active" data-tab="tab-start">
-            🚀 [시작] 양식 & 교사 명단 등록
-          </button>
-          <button type="button" class="tab-btn" data-tab="tab-progress">
-            📊 [진행] 실시간 서명 현황
-          </button>
-          <button type="button" class="tab-btn" data-tab="tab-complete">
-            📁 [완료] PDF 출력 & 다운로드
-          </button>
-        </nav>
+      <!-- 상단 탭 네비게이션: [시작], [진행], [완료] -->
+      <nav class="admin-tab-nav">
+        <button type="button" class="tab-btn active" data-tab="tab-start">
+          🚀 [시작] 양식 & 대상자 등록
+        </button>
+        <button type="button" class="tab-btn" data-tab="tab-progress">
+          📊 [진행] 실시간 서명 현황
+        </button>
+        <button type="button" class="tab-btn" data-tab="tab-complete">
+          📁 [완료] PDF 출력 & 다운로드
+        </button>
+      </nav>
 
       <!-- 1. [시작] 메뉴 탭 -->
       <div class="tab-content active" id="tab-start">
         
-        <!-- [시작] 탭: 현재 지정된 서류 안내 바 -->
-        <div class="current-doc-header-banner" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.25rem; background: linear-gradient(135deg, #eff6ff, #dbeafe); border: 1.5px solid #93c5fd; border-radius: var(--radius-md); padding: 0.85rem 1.25rem; flex-wrap: wrap; gap: 0.75rem;">
-          <div style="display: flex; align-items: center; gap: 0.65rem;">
-            <span style="font-size: 0.8rem; font-weight: 800; color: white; background: #2563eb; padding: 0.25rem 0.6rem; border-radius: 6px;">현재 지정된 서류</span>
-            <h3 class="active-doc-title-display" style="font-size: 1.15rem; font-weight: 800; color: #1e293b; margin: 0;">-</h3>
-          </div>
-          <div class="active-doc-meta-display" style="font-size: 0.85rem; color: #1e40af; font-weight: 600;"></div>
-        </div>
-        
-        <!-- 양식 파일 설정 (자동 양식 생성 / PDF 업로드) -->
+        <!-- 양식 파일 업로드 -->
         <div class="card">
-          <div class="card-title">📄 서명 양식 설정 (자동 양식 생성 / PDF 파일 업로드)</div>
-          <p class="card-desc">원하시는 방식을 선택하세요: <strong>제목과 명단으로 2열 표 양식을 자동 생성</strong>하거나, <strong>기존 PDF 파일</strong>을 직접 업로드하여 사용하실 수 있습니다.</p>
+          <div class="card-title">📄 양식 파일 업로드 (문서 내 대상자 성명 자동 인식)</div>
+          <p class="card-desc">PDF 양식 파일을 등록하면 <strong>문서에 기재된 선생님 성명을 자동으로 분석하여 서명 대상자로 자동 등록</strong>합니다.</p>
           
-          <!-- 방식 선택 탭 버튼 -->
-          <div style="display: flex; gap: 0.5rem; margin-bottom: 1.25rem;">
-            <button type="button" id="btnModeAutoForm" class="nav-link-btn primary" style="flex: 1; padding: 0.75rem; font-size: 0.95rem; justify-content: center; font-weight: 700;">
-              ✨ 1. 제목 & 명단 기반 표 양식 자동 생성
-            </button>
-            <button type="button" id="btnModeUploadPdf" class="nav-link-btn" style="flex: 1; padding: 0.75rem; font-size: 0.95rem; justify-content: center; font-weight: 700;">
-              📤 2. 기존 PDF 파일 직접 업로드
-            </button>
-          </div>
-
-          <!-- 방식 1: 자동 양식 생성 섹션 -->
-          <div id="sectionAutoForm" style="display: block; background: #f8fafc; border: 1.5px solid var(--gray-200); border-radius: var(--radius-md); padding: 1.25rem; margin-bottom: 1rem;">
-            <div style="display: grid; grid-template-columns: 1fr; gap: 1rem; margin-bottom: 1rem;">
-              <div>
-                <label style="font-size: 0.9rem; font-weight: 700; color: var(--gray-800); display: block; margin-bottom: 0.4rem;">
-                  📌 문서 제목 <span style="font-size: 0.8rem; font-weight: 400; color: var(--gray-500);">(작성되는 문서 최상단 중앙에 크게 표기)</span>
-                </label>
-                <input type="text" id="autoFormTitle" class="input-field" placeholder="문서 제목을 입력하세요 (예: 2026학년도 교직원 서약서)" value="">
-              </div>
-
-              <div>
-                <label style="font-size: 0.9rem; font-weight: 700; color: var(--gray-800); display: block; margin-bottom: 0.4rem;">
-                  🏢 부서 또는 담당자명 <span style="font-size: 0.8rem; font-weight: 400; color: var(--gray-500);">(제목 우측 아래에 제목보다 작은 글씨로 표기)</span>
-                </label>
-                <input type="text" id="autoFormDept" class="input-field" placeholder="부서 또는 담당자명을 입력하세요 (예: 교무기획부 / 담당자: 홍길동)" value="">
-              </div>
-            </div>
-
-            <div style="background: white; border: 1px solid var(--gray-200); border-radius: var(--radius-sm); padding: 0.85rem 1rem; font-size: 0.85rem; color: var(--gray-600); margin-bottom: 1rem;">
-              💡 <strong>2열 표 자동 분할 규칙:</strong> 전체 서명 대상자가 <em>n</em>명일 때, <strong>왼쪽에 1번부터 세로로 ⌈n/2⌉번</strong>까지, <strong>오른쪽에 그 다음 번호부터 끝번호</strong>까지 배치되며(홀수면 왼쪽에 한 명 더 배치), 각 행마다 <strong>[연번], [성명], [서명란]</strong>이 자동으로 생성됩니다.
-            </div>
-
-            <button type="button" id="btnGenerateAutoForm" class="btn-primary" style="width: 100%; display: flex; align-items: center; justify-content: center; gap: 0.5rem; font-size: 1rem;">
-              ✨ 이 설정과 명단으로 표 양식 자동 생성 및 문서 반영
-            </button>
-          </div>
-
-          <!-- 방식 2: PDF 파일 직접 업로드 섹션 -->
-          <div id="sectionUploadPdf" style="display: none;">
-            <div class="upload-dropzone" id="pdfDropzone">
-              <div class="upload-icon">📤</div>
-              <div class="upload-text">PDF 양식 파일을 이곳으로 끌어다 놓거나 클릭하여 선택하세요</div>
-              <div class="upload-sub">💡 PDF 안의 성명(이름)을 자동으로 읽어서 서명 대상자로 등록해 드립니다.</div>
-              <input type="file" id="pdfFileInput" accept="application/pdf" style="display: none;">
-            </div>
+          <div class="upload-dropzone" id="pdfDropzone">
+            <div class="upload-icon">📤</div>
+            <div class="upload-text">PDF 양식 파일을 이곳으로 끌어다 놓거나 클릭하여 선택하세요</div>
+            <div class="upload-sub">💡 PDF 안의 성명(이름)을 자동으로 읽어서 서명 대상자로 등록해 드립니다.</div>
+            <input type="file" id="pdfFileInput" accept="application/pdf" style="display: none;">
           </div>
 
           <div class="current-form-badge">
             <div class="form-info">
               <span>📌 현재 등록된 양식:</span>
-              <span id="currentFormName" style="color: var(--primary);">2열 표준 표 양식 (자동 생성)</span>
+              <span id="currentFormName" style="color: var(--primary);">기본 표준 서약서 양식 (내장 템플릿)</span>
             </div>
             <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
-              <button type="button" id="btnAutoExtractNames" class="nav-link-btn primary" style="display: none;">✨ PDF에서 성명 자동 추출</button>
-              <button type="button" id="btnPreviewCurrentForm" class="nav-link-btn">👁️ 미리보기</button>
+              <button type="button" id="btnAutoExtractNames" class="nav-link-btn primary">✨ PDF에서 성명 자동 추출</button>
+              <button type="button" id="btnPreviewCurrentForm" class="nav-link-btn">미리보기</button>
               <button type="button" id="btnResetToDefaultForm" class="nav-link-btn">기본 양식으로 복원</button>
             </div>
           </div>
@@ -390,15 +265,6 @@
       <!-- 2. [진행] 메뉴 탭 -->
       <div class="tab-content" id="tab-progress">
         
-        <!-- [진행] 탭: 현재 지정된 서류 안내 바 -->
-        <div class="current-doc-header-banner" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.25rem; background: linear-gradient(135deg, #eff6ff, #dbeafe); border: 1.5px solid #93c5fd; border-radius: var(--radius-md); padding: 0.85rem 1.25rem; flex-wrap: wrap; gap: 0.75rem;">
-          <div style="display: flex; align-items: center; gap: 0.65rem;">
-            <span style="font-size: 0.8rem; font-weight: 800; color: white; background: #2563eb; padding: 0.25rem 0.6rem; border-radius: 6px;">현재 지정된 서류</span>
-            <h3 class="active-doc-title-display" style="font-size: 1.15rem; font-weight: 800; color: #1e293b; margin: 0;">-</h3>
-          </div>
-          <div class="active-doc-meta-display" style="font-size: 0.85rem; color: #1e40af; font-weight: 600;"></div>
-        </div>
-
         <!-- 실시간 요약 카드 -->
         <div class="stats-grid">
           <div class="stat-card">
@@ -416,22 +282,6 @@
           <div class="stat-card">
             <div class="stat-label">서명 완료율</div>
             <div class="stat-value primary" id="statProgressPercent">0%</div>
-          </div>
-        </div>
-
-        <!-- [진행] 현재 서류 실시간 서명 문서 미리보기 -->
-        <div class="card" style="margin-bottom: 1.25rem;">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; flex-wrap: wrap; gap: 0.5rem;">
-            <div>
-              <div class="card-title" style="margin-bottom: 0.2rem;">📄 현재 서류 실시간 서명 문서 미리보기</div>
-              <p class="card-desc" style="margin-bottom: 0;">선생님들이 서명한 내역이 실시간으로 날인된 현재 서류의 원본 양식입니다.</p>
-            </div>
-            <button type="button" id="btnRefreshProgressDoc" class="nav-link-btn" style="font-size: 0.85rem;">
-              🔄 서류 미리보기 새로고침
-            </button>
-          </div>
-          <div class="doc-viewer-frame" id="progressDocViewerFrame" style="height: 480px;">
-            <div id="progressDocPagesContainer"></div>
           </div>
         </div>
 
@@ -475,15 +325,6 @@
 
       <!-- 3. [완료] 메뉴 탭 -->
       <div class="tab-content" id="tab-complete">
-        
-        <!-- [완료] 탭: 현재 지정된 서류 안내 바 -->
-        <div class="current-doc-header-banner" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.25rem; background: linear-gradient(135deg, #eff6ff, #dbeafe); border: 1.5px solid #93c5fd; border-radius: var(--radius-md); padding: 0.85rem 1.25rem; flex-wrap: wrap; gap: 0.75rem;">
-          <div style="display: flex; align-items: center; gap: 0.65rem;">
-            <span style="font-size: 0.8rem; font-weight: 800; color: white; background: #2563eb; padding: 0.25rem 0.6rem; border-radius: 6px;">현재 지정된 서류</span>
-            <h3 class="active-doc-title-display" style="font-size: 1.15rem; font-weight: 800; color: #1e293b; margin: 0;">-</h3>
-          </div>
-          <div class="active-doc-meta-display" style="font-size: 0.85rem; color: #1e40af; font-weight: 600;"></div>
-        </div>
         
         <!-- 서명 문서 출력 및 다운로드 방식 선택 -->
         <div class="card" style="margin-bottom: 1.25rem;">
@@ -598,8 +439,6 @@
 
       </div>
 
-      </div> <!-- /#adminDocDetailArea (서류 라디오 선택 시 열리는 상세 영역) -->
-
     </section>
 
   </main>
@@ -674,10 +513,9 @@
   <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>
 
   <!-- 애플리케이션 스크립트 -->
-  <script src="config.js?v=20261115_1225"></script>
-  <script src="app.js?v=20261115_1225"></script>
+  <script src="config.js?v=20261116_1535"></script>
+  <script src="app.js?v=20261116_1535"></script>
 </body>
 </html>
