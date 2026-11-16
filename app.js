@@ -160,6 +160,13 @@
             localStorage.setItem('yewon_sig_position', JSON.stringify(state.sigPosition));
             changed = true;
           }
+          if (cfg.templateName && cfg.templateName !== state.pdfTemplate.name) {
+            state.pdfTemplate.name = cfg.templateName;
+            localStorage.setItem('yewon_template_name', cfg.templateName);
+            if (el.currentFormName) el.currentFormName.textContent = cfg.templateName;
+            if (el.completeSectionDocTitle) el.completeSectionDocTitle.textContent = cfg.templateName;
+            changed = true;
+          }
           if (changed) {
             if (typeof renderSignersEditor === 'function') renderSignersEditor();
             if (typeof renderProgressTable === 'function') renderProgressTable();
@@ -251,6 +258,12 @@
       if (savedPos) {
         state.sigPosition = { ...state.sigPosition, ...JSON.parse(savedPos) };
       }
+      const savedTitle = localStorage.getItem('yewon_template_name');
+      if (savedTitle) {
+        state.pdfTemplate.name = savedTitle;
+        if (typeof el !== 'undefined' && el.currentFormName) el.currentFormName.textContent = savedTitle;
+        if (typeof el !== 'undefined' && el.completeSectionDocTitle) el.completeSectionDocTitle.textContent = savedTitle;
+      }
     } catch (e) {
       console.warn('loadLocalSettings error:', e);
     }
@@ -260,10 +273,14 @@
     try {
       localStorage.setItem('yewon_signers', JSON.stringify(state.signers));
       localStorage.setItem('yewon_sig_position', JSON.stringify(state.sigPosition));
+      if (state.pdfTemplate && state.pdfTemplate.name) {
+        localStorage.setItem('yewon_template_name', state.pdfTemplate.name);
+      }
       if (firestore) {
         firestore.collection('config').doc('system').set({
           signers: state.signers,
           sigPosition: state.sigPosition,
+          templateName: state.pdfTemplate ? state.pdfTemplate.name : '',
           updatedAt: firebase.firestore.FieldValue.serverTimestamp()
         }, { merge: true }).catch(err => console.warn('Firestore config 동기화 오류:', err));
       }
@@ -471,6 +488,7 @@
     pdfDropzone: document.getElementById('pdfDropzone'),
     pdfFileInput: document.getElementById('pdfFileInput'),
     currentFormName: document.getElementById('currentFormName'),
+    btnOpenEditDocTitleModal: document.getElementById('btnOpenEditDocTitleModal'),
     btnAutoExtractNames: document.getElementById('btnAutoExtractNames'),
     btnPreviewCurrentForm: document.getElementById('btnPreviewCurrentForm'),
     btnResetToDefaultForm: document.getElementById('btnResetToDefaultForm'),
@@ -507,6 +525,8 @@
     modeCardIndividual: document.getElementById('modeCardIndividual'),
     completeSectionAllInOne: document.getElementById('completeSectionAllInOne'),
     completeSectionIndividual: document.getElementById('completeSectionIndividual'),
+    completeSectionDocTitle: document.getElementById('completeSectionDocTitle'),
+    btnEditDocTitleFromComplete: document.getElementById('btnEditDocTitleFromComplete'),
     unifiedSignCountBadge: document.getElementById('unifiedSignCountBadge'),
     btnPrintUnifiedPdf: document.getElementById('btnPrintUnifiedPdf'),
     btnDownloadUnifiedPdf: document.getElementById('btnDownloadUnifiedPdf'),
@@ -536,6 +556,14 @@
     btnClosePdfPreviewModal: document.getElementById('btnClosePdfPreviewModal'),
     pdfPreviewModalTitle: document.getElementById('pdfPreviewModalTitle'),
     modalPdfPagesContainer: document.getElementById('modalPdfPagesContainer'),
+
+    // Edit Doc Title Modal
+    editDocTitleModal: document.getElementById('editDocTitleModal'),
+    btnCloseEditDocTitleModal: document.getElementById('btnCloseEditDocTitleModal'),
+    btnCancelEditDocTitle: document.getElementById('btnCancelEditDocTitle'),
+    btnSaveEditDocTitle: document.getElementById('btnSaveEditDocTitle'),
+    editDocTitleForm: document.getElementById('editDocTitleForm'),
+    editDocTitleInput: document.getElementById('editDocTitleInput'),
 
     appToast: document.getElementById('appToast')
   };
@@ -1805,6 +1833,73 @@
     }
   }
 
+  // ==========================================================================
+  // [10-1] 서류 제목 수정 (지정한 이름과 서명은 100% 안전하게 유지)
+  // ==========================================================================
+  function openEditDocTitleModal() {
+    if (!el.editDocTitleModal || !el.editDocTitleInput) return;
+    let currentTitle = state.pdfTemplate.name || '기본 표준 서약서 양식.pdf';
+    if (currentTitle.toLowerCase().endsWith('.pdf')) {
+      currentTitle = currentTitle.slice(0, -4);
+    }
+    el.editDocTitleInput.value = currentTitle;
+    el.editDocTitleModal.style.display = 'flex';
+    setTimeout(() => {
+      el.editDocTitleInput.focus();
+      el.editDocTitleInput.select();
+    }, 100);
+  }
+
+  function closeEditDocTitleModal() {
+    if (el.editDocTitleModal) {
+      el.editDocTitleModal.style.display = 'none';
+    }
+  }
+
+  async function handleSaveDocTitle() {
+    const rawInput = (el.editDocTitleInput ? el.editDocTitleInput.value : '').trim();
+    if (!rawInput) {
+      showToast('⚠️ 서류 제목을 입력해 주세요.');
+      if (el.editDocTitleInput) el.editDocTitleInput.focus();
+      return;
+    }
+
+    const finalTitle = rawInput.toLowerCase().endsWith('.pdf') ? rawInput : `${rawInput}.pdf`;
+
+    // 기존 양식 바이트를 그대로 유지 (새로 서류를 생성하여 기존 내용을 덮어쓰지 않음!)
+    let templateBytes = state.pdfTemplate.bytes;
+    if (!templateBytes) {
+      templateBytes = await generateDefaultPdfTemplate();
+      state.pdfTemplate.bytes = templateBytes;
+    }
+
+    // ★ 핵심: 서류 제목만 안전하게 변경하고, 지정한 이름(signers)과 서명(signatures)은 그대로 유지!
+    state.pdfTemplate.name = finalTitle;
+    state.cachedUnifiedPdfBytes = null; // 인쇄/다운로드 시 최신 파일명 반영을 위한 캐시 무효화
+
+    // 1. IndexedDB에 변경된 서류 제목으로 저장 (양식 바이트 그대로 보존)
+    await saveFileToDB('activeTemplate', templateBytes, finalTitle);
+
+    // 2. 로컬 스토리지 및 Firebase 클라우드 동기화 (지정된 명단과 서명 데이터 보존 상태로 저장)
+    saveLocalSettings();
+
+    // 3. 화면 UI 즉시 갱신
+    if (el.currentFormName) {
+      el.currentFormName.textContent = finalTitle;
+    }
+    if (el.completeSectionDocTitle) {
+      el.completeSectionDocTitle.textContent = finalTitle;
+    }
+
+    // 완료 탭 목록 및 통계 등 갱신
+    renderCompleteTable();
+    updateCompleteTabUI();
+
+    closeEditDocTitleModal();
+
+    showToast(`✅ 서류 제목이 "${finalTitle}"(으)로 수정되었습니다.\n(지정한 이름과 서명은 그대로 유지됩니다)`, 3000);
+  }
+
   // 기본 양식으로 복원
   async function handleResetToDefaultForm() {
     if (!confirm('기본 표준 서약서 양식으로 복원하시겠습니까?')) return;
@@ -2443,6 +2538,44 @@
         }
       });
     }
+    // 서류 제목 수정 버튼 및 모달 리스너
+    if (el.btnOpenEditDocTitleModal) {
+      el.btnOpenEditDocTitleModal.addEventListener('click', openEditDocTitleModal);
+    }
+    if (el.btnEditDocTitleFromComplete) {
+      el.btnEditDocTitleFromComplete.addEventListener('click', openEditDocTitleModal);
+    }
+    if (el.btnCloseEditDocTitleModal) {
+      el.btnCloseEditDocTitleModal.addEventListener('click', closeEditDocTitleModal);
+    }
+    if (el.btnCancelEditDocTitle) {
+      el.btnCancelEditDocTitle.addEventListener('click', closeEditDocTitleModal);
+    }
+    if (el.btnSaveEditDocTitle) {
+      el.btnSaveEditDocTitle.addEventListener('click', handleSaveDocTitle);
+    }
+    if (el.editDocTitleForm) {
+      el.editDocTitleForm.addEventListener('submit', (e) => {
+        e.preventDefault();
+        handleSaveDocTitle();
+      });
+    }
+    if (el.editDocTitleInput) {
+      el.editDocTitleInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          handleSaveDocTitle();
+        } else if (e.key === 'Escape') {
+          closeEditDocTitleModal();
+        }
+      });
+    }
+    if (el.editDocTitleModal) {
+      el.editDocTitleModal.addEventListener('click', (e) => {
+        if (e.target === el.editDocTitleModal) closeEditDocTitleModal();
+      });
+    }
+
     if (el.btnResetToDefaultForm) el.btnResetToDefaultForm.addEventListener('click', handleResetToDefaultForm);
 
     if (el.btnAddSigners) el.btnAddSigners.addEventListener('click', handleAddSigners);
@@ -2644,6 +2777,7 @@
         state.pdfTemplate.name = savedTemplate.name || '등록된 양식.pdf';
         state.pdfTemplate.bytes = savedTemplate.data;
         if (el.currentFormName) el.currentFormName.textContent = state.pdfTemplate.name;
+        if (el.completeSectionDocTitle) el.completeSectionDocTitle.textContent = state.pdfTemplate.name;
       } else {
         // 기본 템플릿 생성
         const defaultBytes = await generateDefaultPdfTemplate();
@@ -2651,6 +2785,7 @@
           state.pdfTemplate.name = '기본 표준 서약서 양식 (내장 템플릿).pdf';
           state.pdfTemplate.bytes = defaultBytes;
           if (el.currentFormName) el.currentFormName.textContent = state.pdfTemplate.name;
+          if (el.completeSectionDocTitle) el.completeSectionDocTitle.textContent = state.pdfTemplate.name;
           await saveFileToDB('activeTemplate', defaultBytes, state.pdfTemplate.name);
         }
       }

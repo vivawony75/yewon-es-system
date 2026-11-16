@@ -166,9 +166,12 @@
           </div>
 
           <div class="current-form-badge">
-            <div class="form-info">
-              <span>📌 현재 등록된 양식:</span>
-              <span id="currentFormName" style="color: var(--primary);">기본 표준 서약서 양식 (내장 템플릿)</span>
+            <div class="form-info" style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+              <span>📌 현재 등록된 서류 제목:</span>
+              <strong id="currentFormName" style="color: var(--primary); font-size: 0.98rem;">기본 표준 서약서 양식 (내장 템플릿)</strong>
+              <button type="button" id="btnOpenEditDocTitleModal" class="header-mini-btn" style="background: white; border: 1.5px solid var(--primary); color: var(--primary); font-weight: 700; cursor: pointer; padding: 0.25rem 0.65rem; border-radius: 6px; display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.82rem;" title="지정된 이름과 서명을 그대로 유지하면서 서류 제목만 변경합니다">
+                ✏️ 수정
+              </button>
             </div>
             <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
               <button type="button" id="btnAutoExtractNames" class="nav-link-btn primary">✨ PDF에서 성명 자동 추출</button>
@@ -375,6 +378,9 @@
                 </span>
               </div>
               <p class="card-desc" style="margin-bottom: 0;">
+                현재 서류명: <strong id="completeSectionDocTitle" style="color: var(--primary);">기본 표준 서약서 양식.pdf</strong>
+                <button type="button" id="btnEditDocTitleFromComplete" class="header-mini-btn" style="background: white; border: 1px solid var(--primary); color: var(--primary); font-weight: 700; cursor: pointer; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.78rem; margin-left: 0.35rem;" title="지정된 이름과 서명을 그대로 유지한 채 서류 제목을 수정합니다">✏️ 수정</button>
+                <br>
                 서명을 마친 모든 사용자의 서명이 <strong>각자의 이름 옆 칸 가운데에 자동으로 배치</strong>되어 있는 통합 인쇄 문서입니다.
               </p>
             </div>
@@ -505,6 +511,39 @@
     </div>
   </div>
 
+  <!-- 모달 창: 서류 제목 수정 모달 -->
+  <div class="modal-overlay" id="editDocTitleModal" style="display: none;">
+    <div class="modal-card" style="max-width: 480px; width: 90%;">
+      <button type="button" class="modal-close-btn" id="btnCloseEditDocTitleModal">&times;</button>
+      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
+        <span style="font-size: 1.4rem;">✏️</span>
+        <h3 style="font-size: 1.25rem; font-weight: 800; color: var(--gray-900); margin: 0;">서류 제목 수정</h3>
+      </div>
+      <p style="font-size: 0.85rem; color: var(--gray-600); margin-bottom: 1.25rem; line-height: 1.45;">
+        새로운 서류 제목(문서명)을 입력해 주세요.<br>
+        <span style="color: var(--primary); font-weight: 700;">💡 지정한 서명 대상자 명단과 이미 작성된 서명 데이터는 100% 안전하게 유지됩니다.</span>
+      </p>
+
+      <form id="editDocTitleForm" onsubmit="return false;">
+        <div style="margin-bottom: 1.25rem;">
+          <label style="font-size: 0.85rem; font-weight: 700; color: var(--gray-700); display: block; margin-bottom: 0.35rem;">
+            서류 제목 (문서명)
+          </label>
+          <input type="text" id="editDocTitleInput" class="input-field" placeholder="예: 2026학년도 체험교실 출근부" required autocomplete="off" style="font-size: 0.95rem; font-weight: 600;">
+        </div>
+
+        <div style="display: flex; gap: 0.5rem; justify-content: flex-end;">
+          <button type="button" id="btnCancelEditDocTitle" class="btn-secondary" style="padding: 0.6rem 1.2rem;">
+            취소
+          </button>
+          <button type="button" id="btnSaveEditDocTitle" class="btn-primary" style="padding: 0.6rem 1.4rem;">
+            💾 변경 완료
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <!-- 알림 토스트 메시지 -->
   <div class="toast" id="appToast">알림 메시지</div>
 
@@ -515,7 +554,7 @@
   <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
 
   <!-- 애플리케이션 스크립트 -->
-  <script src="config.js?v=20261116_1535"></script>
-  <script src="app.js?v=20261116_1535"></script>
+  <script src="config.js?v=20261116_1547"></script>
+  <script src="app.js?v=20261116_1547"></script>
 </body>
 </html>
